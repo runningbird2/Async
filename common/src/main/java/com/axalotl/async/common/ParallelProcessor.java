@@ -312,7 +312,7 @@ public class ParallelProcessor {
                 entity instanceof Projectile ||
                 entity instanceof AbstractMinecart ||
                 entity instanceof ServerPlayer ||
-                entity instanceof Mob mob && entity.level() instanceof AsyncNavigationTracker navigationTracker && navigationTracker.async$isNavigationActive(mob) ||
+                entity instanceof Mob ||
                 BLOCKED_ENTITIES.contains(entity.getClass()) ||
                 blacklistedEntity.contains(entityId) ||
                 AsyncConfig.isEntitySynchronized(EntityType.getKey(entity.getType()));
