@@ -69,14 +69,8 @@ public abstract class EntityLookupMixin<T extends EntityAccess> {
 
         UUID uuid = entity.getUUID();
         int id = entity.getId();
-
-        byUuid.computeIfPresent(uuid, (k, existing) -> {
-            if (existing.getId() == id) {
-                byId.remove(id);
-                return null;
-            }
-            return existing;
-        });
+        byUuid.remove(uuid);
+        byId.remove(id);
     }
 
     @WrapMethod(method = "getEntity(Ljava/util/UUID;)Lnet/minecraft/world/level/entity/EntityAccess;")

@@ -8,8 +8,6 @@ import it.unimi.dsi.fastutil.longs.LongSets;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.entity.Visibility;
-import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
-import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
@@ -71,14 +69,5 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
         this.knownUuids = concurrentUuids;
 
         this.chunksToUnload = LongSets.synchronize(new LongOpenHashSet(this.chunksToUnload));
-    }
-
-    @WrapMethod(method = "getEffectiveStatus")
-    private static <T extends EntityAccess> Visibility getEffectiveStatus(T entity, Visibility visibility, Operation<Visibility> original) {
-        Visibility result = original.call(entity, visibility);
-        if (result == null) {
-            return entity.isAlwaysTicking() ? Visibility.TICKING : Visibility.TRACKED;
-        }
-        return result;
     }
 }
