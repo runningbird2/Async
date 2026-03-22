@@ -101,19 +101,15 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
         ProfilerFiller profilerfiller = Profiler.get();
 
         List<Entity> toTick = new ArrayList<>();
-        List<Entity> toDespawnCheck = new ArrayList<>();
 
         this.entityTickList.forEach(entity -> {
             if (entity == null || entity.isRemoved()) return;
             if (this.tickRateManager().isEntityFrozen(entity)) return;
 
-            if (!AsyncConfig.disabled && AsyncConfig.enableAsyncSpawn) {
-                toDespawnCheck.add(entity);
-            } else {
-                profilerfiller.push("checkDespawn");
-                entity.checkDespawn();
-                profilerfiller.pop();
-            }
+            // Keep despawn on the level thread; async despawn races lazy-chunk visibility transitions.
+            profilerfiller.push("checkDespawn");
+            entity.checkDespawn();
+            profilerfiller.pop();
 
             if (!this.chunkSource.chunkMap.getDistanceManager()
                     .inEntityTickingRange(entity.chunkPosition().toLong())) return;
@@ -127,33 +123,6 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
             toTick.add(entity);
         });
 
-        if (!toDespawnCheck.isEmpty()) {
-            int poolSize = ParallelProcessor.getPoolSize();
-            int chunkSize = Math.max(1, (toDespawnCheck.size() + poolSize - 1) / poolSize);
-            List<Future<Void>> despawnFutures = new ArrayList<>();
-            for (int i = 0; i < toDespawnCheck.size(); i += chunkSize) {
-                List<Entity> chunk = toDespawnCheck.subList(i, Math.min(i + chunkSize, toDespawnCheck.size()));
-                despawnFutures.add(ParallelProcessor.tickPool.submit(() -> {
-                    for (Entity e : chunk) e.checkDespawn();
-                    return (Void) null;
-                }));
-            }
-            boolean allDone;
-            do {
-                allDone = true;
-                for (Future<Void> f : despawnFutures) {
-                    if (!f.isDone()) { allDone = false; break; }
-                }
-                if (!allDone) {
-                    boolean pumped = false;
-                    for (ServerLevel lvl : ParallelProcessor.getServer().getAllLevels()) {
-                        pumped |= lvl.getChunkSource().pollTask();
-                    }
-                    if (!pumped) Thread.onSpinWait();
-                }
-            } while (!allDone);
-        }
-
         async$precomputeItemFluidStates(toTick);
 
         profilerfiller.push("tick");
@@ -163,7 +132,7 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
 
     @Unique
     private void async$precomputeItemFluidStates(List<Entity> toTick) {
-        if (AsyncConfig.disabled || toTick.isEmpty()) return;
+        if (AsyncConfig.disabled || toTick.isEmpty() || ParallelProcessor.isShuttingDown()) return;
 
         LongOpenHashSet posSet = new LongOpenHashSet();
         for (Entity e : toTick) {
@@ -180,16 +149,30 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
         int poolSize = ParallelProcessor.getPoolSize();
         int chunkSize = Math.max(1, (positions.length + poolSize - 1) / poolSize);
         List<Future<?>> futures = new ArrayList<>();
+        int submittedUntil = 0;
 
-        for (int i = 0; i < positions.length; i += chunkSize) {
-            final int start = i;
-            final int end = Math.min(i + chunkSize, positions.length);
-            futures.add(ParallelProcessor.tickPool.submit(() -> {
-                for (int j = start; j < end; j++) {
-                    results[j] = self.getFluidState(BlockPos.of(positions[j]));
-                }
-                return null;
-            }));
+        try {
+            for (int i = 0; i < positions.length; i += chunkSize) {
+                final int start = i;
+                final int end = Math.min(i + chunkSize, positions.length);
+                futures.add(ParallelProcessor.tickPool.submit(() -> {
+                    for (int j = start; j < end; j++) {
+                        results[j] = self.getFluidState(BlockPos.of(positions[j]));
+                    }
+                    return null;
+                }));
+                submittedUntil = end;
+            }
+        } catch (RejectedExecutionException e) {
+            if (!ParallelProcessor.isShuttingDown()) {
+                ParallelProcessor.LOGGER.warn("Async item fluid precompute unavailable, falling back to synchronous execution", e);
+            } else {
+                return;
+            }
+        }
+
+        for (int i = submittedUntil; i < positions.length; i++) {
+            results[i] = self.getFluidState(BlockPos.of(positions[i]));
         }
 
         boolean allDone;
@@ -199,6 +182,9 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
                 if (!f.isDone()) { allDone = false; break; }
             }
             if (!allDone) {
+                if (ParallelProcessor.isShuttingDown()) {
+                    return;
+                }
                 boolean pumped = false;
                 for (ServerLevel lvl : ParallelProcessor.getServer().getAllLevels()) {
                     pumped |= lvl.getChunkSource().pollTask();
@@ -206,6 +192,21 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
                 if (!pumped) Thread.onSpinWait();
             }
         } while (!allDone);
+
+        boolean futureFailure = false;
+        for (Future<?> future : futures) {
+            try {
+                future.get();
+            } catch (Exception e) {
+                futureFailure = true;
+                ParallelProcessor.LOGGER.error("Error while precomputing item fluid states asynchronously", e);
+            }
+        }
+        if (futureFailure) {
+            for (int i = 0; i < positions.length; i++) {
+                results[i] = self.getFluidState(BlockPos.of(positions[i]));
+            }
+        }
 
         Long2ObjectOpenHashMap<FluidState> fluidMap = new Long2ObjectOpenHashMap<>(positions.length);
         for (int i = 0; i < positions.length; i++) {

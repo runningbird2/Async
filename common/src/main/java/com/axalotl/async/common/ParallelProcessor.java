@@ -65,7 +65,7 @@ public class ParallelProcessor {
                 new LinkedBlockingQueue<>(),
                 threadFactory
         );
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         executor.allowCoreThreadTimeOut(false);
         executor.prestartAllCoreThreads();
         tickPool = executor;
@@ -80,6 +80,10 @@ public class ParallelProcessor {
 
     public static boolean isServerExecutionThread() {
         return IS_POOL_THREAD.get();
+    }
+
+    public static boolean isShuttingDown() {
+        return isShuttingDown;
     }
 
     public static int getPoolSize() {
@@ -104,45 +108,144 @@ public class ParallelProcessor {
             }
         }
 
+        if (asyncEntities.isEmpty()) {
+            syncEntities.forEach(entity -> tickSynchronously(world, entity));
+            return;
+        }
+
         int poolSize = getPoolSize();
-        int chunkSize = (asyncEntities.size() + poolSize - 1) / poolSize;
+        int chunkSize = Math.max(1, (asyncEntities.size() + poolSize - 1) / poolSize);
 
         List<Future<Void>> futures = new ArrayList<>();
-        for (int i = 0; i < asyncEntities.size(); i += chunkSize) {
-            List<Entity> chunk = asyncEntities.subList(i, Math.min(i + chunkSize, asyncEntities.size()));
-            Future<Void> future = (Future<Void>) tickPool.submit(() -> {
-                for (Entity entity : chunk) {
-                    performAsyncEntityTick(world, entity);
+        int submittedUntil = 0;
+        try {
+            for (int i = 0; i < asyncEntities.size(); i += chunkSize) {
+                int end = Math.min(i + chunkSize, asyncEntities.size());
+                List<Entity> chunk = asyncEntities.subList(i, end);
+                Future<Void> future = (Future<Void>) tickPool.submit(() -> {
+                    for (Entity entity : chunk) {
+                        if (entity.isRemoved()) continue;
+                        performAsyncEntityTick(world, entity);
+                    }
+                });
+                futures.add(future);
+                submittedUntil = end;
+            }
+        } catch (RejectedExecutionException e) {
+            if (!isShuttingDown) {
+                LOGGER.warn("Async tick pool rejected entity batch; falling back to synchronous ticking", e);
+            }
+            syncEntities.addAll(asyncEntities.subList(submittedUntil, asyncEntities.size()));
+            syncEntities.forEach(entity -> tickSynchronously(world, entity));
+            waitForFutures(futures);
+            for (Future<Void> future : futures) {
+                if (isShuttingDown && !future.isDone()) {
+                    continue;
                 }
-            });
-            futures.add(future);
-        }
-
-        for (Entity e : syncEntities) {
-            tickSynchronously(world, e);
-        }
-
-        boolean allDone;
-        do {
-            allDone = futures.stream().allMatch(Future::isDone);
-            if (!allDone) {
-                boolean pumped = false;
-                for (ServerLevel lvl : server.getAllLevels()) {
-                    pumped |= lvl.getChunkSource().pollTask();
-                }
-                if (!pumped) {
-                    Thread.onSpinWait();
+                try {
+                    future.get();
+                } catch (Exception futureException) {
+                    LOGGER.error("Error in async entity tick", futureException);
                 }
             }
-        } while (!allDone);
+            return;
+        }
+
+        syncEntities.forEach(entity -> tickSynchronously(world, entity));
+
+        waitForFutures(futures);
 
         for (Future<Void> future : futures) {
+            if (isShuttingDown && !future.isDone()) {
+                continue;
+            }
             try {
                 future.get();
             } catch (Exception e) {
                 LOGGER.error("Error in async entity tick", e);
             }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void callEntityDespawnCheckBatch(List<Entity> entities) {
+        if (entities.isEmpty()) return;
+        if (AsyncConfig.disabled) {
+            entities.forEach(ParallelProcessor::checkDespawnSynchronously);
+            return;
+        }
+
+        int poolSize = Math.max(1, getPoolSize());
+        int chunkSize = Math.max(1, (entities.size() + poolSize - 1) / poolSize);
+
+        List<Future<Void>> futures = new ArrayList<>();
+        int submittedUntil = 0;
+        try {
+            for (int i = 0; i < entities.size(); i += chunkSize) {
+                int end = Math.min(i + chunkSize, entities.size());
+                List<Entity> chunk = entities.subList(i, end);
+                Future<Void> future = (Future<Void>) tickPool.submit(() -> {
+                    for (Entity entity : chunk) {
+                        if (entity.isRemoved()) continue;
+                        entity.checkDespawn();
+                    }
+                });
+                futures.add(future);
+                submittedUntil = end;
+            }
+        } catch (RejectedExecutionException e) {
+            if (!isShuttingDown) {
+                LOGGER.warn("Async tick pool rejected despawn batch; falling back to synchronous despawn checks", e);
+            }
+            entities.subList(submittedUntil, entities.size()).forEach(ParallelProcessor::checkDespawnSynchronously);
+            waitForFutures(futures);
+            for (Future<Void> future : futures) {
+                if (isShuttingDown && !future.isDone()) {
+                    continue;
+                }
+                try {
+                    future.get();
+                } catch (Exception futureException) {
+                    LOGGER.error("Error in async entity despawn check", futureException);
+                }
+            }
+            return;
+        }
+
+        waitForFutures(futures);
+
+        for (Future<Void> future : futures) {
+            if (isShuttingDown && !future.isDone()) {
+                continue;
+            }
+            try {
+                future.get();
+            } catch (Exception e) {
+                LOGGER.error("Error in async entity despawn check", e);
+            }
+        }
+    }
+
+    private static void waitForFutures(List<? extends Future<?>> futures) {
+        boolean allDone;
+        do {
+            allDone = futures.stream().allMatch(Future::isDone);
+            if (!allDone) {
+                if (isShuttingDown) {
+                    break;
+                }
+                boolean pumped = false;
+                MinecraftServer currentServer = server;
+                if (currentServer != null) {
+                    for (ServerLevel lvl : currentServer.getAllLevels()) {
+                        pumped |= lvl.getChunkSource().pollTask();
+                    }
+                }
+                if (!pumped) {
+                    Thread.onSpinWait();
+                }
+            }
+        } while (!allDone);
     }
 
     public static boolean shouldTickSynchronously(Entity entity) {
@@ -165,10 +268,24 @@ public class ParallelProcessor {
     }
 
     private static void tickSynchronously(ServerLevel world, Entity entity) {
+        if (entity.isRemoved()) {
+            return;
+        }
         try {
             world.tickNonPassenger(entity);
         } catch (Exception e) {
             logEntityError(entity, e);
+        }
+    }
+
+    private static void checkDespawnSynchronously(Entity entity) {
+        if (entity.isRemoved()) {
+            return;
+        }
+        try {
+            entity.checkDespawn();
+        } catch (Exception e) {
+            logDespawnError(entity, e);
         }
     }
 
@@ -184,20 +301,42 @@ public class ParallelProcessor {
     @SuppressWarnings("ResultOfMethodCallIgnored")
     public static void stop() {
         isShuttingDown = true;
-        if (tickPool != null) {
-            LOGGER.info("Waiting for Async tickPool to shutdown...");
-            tickPool.shutdown();
-            try {
-                tickPool.awaitTermination(60L, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {
-            }
-        }
+        shutdownExecutor("tickPool", tickPool);
         AsyncConfig.clearCaches();
         blacklistedEntity.clear();
         PortalTeleportationManager.shutdown();
     }
 
+    @SuppressWarnings("ResultOfMethodCallIgnored")
+    private static void shutdownExecutor(String name, ExecutorService executor) {
+        if (executor == null) {
+            return;
+        }
+
+        LOGGER.info("Waiting for Async {} to shutdown...", name);
+        executor.shutdown();
+        try {
+            if (executor.awaitTermination(60L, TimeUnit.SECONDS)) {
+                return;
+            }
+
+            List<Runnable> droppedTasks = executor.shutdownNow();
+            LOGGER.warn("Async {} did not shut down within 60 seconds; forcing interrupt shutdown ({} queued tasks dropped)", name, droppedTasks.size());
+            if (!executor.awaitTermination(10L, TimeUnit.SECONDS)) {
+                LOGGER.warn("Async {} is still running after forced shutdown", name);
+            }
+        } catch (InterruptedException e) {
+            List<Runnable> droppedTasks = executor.shutdownNow();
+            LOGGER.warn("Interrupted while waiting for Async {} to shutdown; forcing interrupt shutdown ({} queued tasks dropped)", name, droppedTasks.size());
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private static void logEntityError(Entity entity, Throwable e) {
         LOGGER.error("{} Entity Type: {}, UUID: {}", "Error during synchronous tick", entity.getType().toString(), entity.getUUID(), e);
+    }
+
+    private static void logDespawnError(Entity entity, Throwable e) {
+        LOGGER.error("{} Entity Type: {}, UUID: {}", "Error during despawn check", entity.getType().toString(), entity.getUUID(), e);
     }
 }
