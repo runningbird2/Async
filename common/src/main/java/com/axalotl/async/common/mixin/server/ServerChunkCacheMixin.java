@@ -3,6 +3,7 @@ package com.axalotl.async.common.mixin.server;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
+import com.axalotl.async.common.spawn.AsyncPreparedFullChunkSnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
@@ -266,14 +267,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
         Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = async$capturePlayersNearChunkSnapshot();
+        AsyncPreparedFullChunkSnapshot fullChunkSnapshot = async$captureReadyFullChunkSnapshot(entitySnapshot);
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
-            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
+            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot, fullChunkSnapshot);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
+        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot, fullChunkSnapshot);
         return state;
     }
 
@@ -393,7 +395,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             long targetTick,
             int spawnableChunkCount,
             List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot,
-            Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot
+            Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot,
+            AsyncPreparedFullChunkSnapshot fullChunkSnapshot
     ) {
         if (ParallelProcessor.isShuttingDown()) {
             async$preparedSpawnStateTask = null;
@@ -419,7 +422,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                                     spawnableChunkCount,
                                     entitySnapshot,
                                     playersNearChunkSnapshot,
-                                    this.level
+                                    fullChunkSnapshot
                             );
                         } catch (CancellationException e) {
                             throw e;
@@ -483,6 +486,28 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             }
         }
         return playersNearChunkSnapshot;
+    }
+
+    @Unique
+    private AsyncPreparedFullChunkSnapshot async$captureReadyFullChunkSnapshot(List<AsyncPreparedSpawnEntitySnapshot> entities) {
+        Long2ObjectOpenHashMap<LevelChunk> chunks = new Long2ObjectOpenHashMap<>();
+        for (AsyncPreparedSpawnEntitySnapshot entity : entities) {
+            long chunkPosLong = entity.chunkPosLong();
+            if (chunks.containsKey(chunkPosLong)) {
+                continue;
+            }
+
+            ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPosLong);
+            if (holder == null) {
+                continue;
+            }
+
+            LevelChunk chunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+            if (chunk != null) {
+                chunks.put(chunkPosLong, chunk);
+            }
+        }
+        return new AsyncPreparedFullChunkSnapshot(chunks);
     }
 
     @Unique

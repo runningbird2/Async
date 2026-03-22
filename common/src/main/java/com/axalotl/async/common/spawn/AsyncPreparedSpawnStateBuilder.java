@@ -5,15 +5,15 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.PotentialCalculator;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.biome.MobSpawnSettings;
-import net.minecraft.world.level.chunk.LevelChunk;
 
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 
 public final class AsyncPreparedSpawnStateBuilder {
@@ -25,17 +25,17 @@ public final class AsyncPreparedSpawnStateBuilder {
             int spawnableChunkCount,
             List<AsyncPreparedSpawnEntitySnapshot> entities,
             Long2ObjectMap<List<ServerPlayer>> playersNearChunkSnapshot,
-            ServerLevel level
+            AsyncPreparedFullChunkSnapshot fullChunkSnapshot
     ) {
         async$abortIfCancelled();
         PotentialCalculator spawnPotential = new PotentialCalculator();
         Object2IntOpenHashMap<MobCategory> mobCategoryCounts = new Object2IntOpenHashMap<>(MobCategory.values().length);
-        Long2ObjectOpenHashMap<int[]> chunkMobCounts = new Long2ObjectOpenHashMap<>();
+        Map<ServerPlayer, int[]> playerMobCounts = new IdentityHashMap<>();
 
         for (AsyncPreparedSpawnEntitySnapshot entity : entities) {
             async$abortIfCancelled();
             BlockPos blockPos = entity.blockPos();
-            LevelChunk chunk = level.getChunkSource().getChunkNow(blockPos.getX() >> 4, blockPos.getZ() >> 4);
+            var chunk = fullChunkSnapshot.get(entity.chunkPosLong());
             if (chunk == null) {
                 continue;
             }
@@ -59,7 +59,9 @@ public final class AsyncPreparedSpawnStateBuilder {
                 continue;
             }
 
-            chunkMobCounts.computeIfAbsent(entity.chunkPosLong(), ignored -> new int[MobCategory.values().length])[category.ordinal()]++;
+            for (ServerPlayer player : players) {
+                playerMobCounts.computeIfAbsent(player, ignored -> new int[MobCategory.values().length])[category.ordinal()]++;
+            }
         }
 
         return new AsyncPreparedSpawnState(
@@ -67,7 +69,7 @@ public final class AsyncPreparedSpawnStateBuilder {
                 mobCategoryCounts,
                 spawnPotential,
                 new Long2ObjectOpenHashMap<>(playersNearChunkSnapshot),
-                chunkMobCounts
+                playerMobCounts
         );
     }
 
