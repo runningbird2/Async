@@ -267,16 +267,16 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         }
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
-        Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = async$capturePlayersNearChunkSnapshot();
         AsyncPreparedFullChunkSnapshot fullChunkSnapshot = async$captureReadyFullChunkSnapshot(entitySnapshot);
-        NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
+        AsyncPreparedSpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
-            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot, fullChunkSnapshot);
-            return preparedState;
+            async$populateLocalMobCapCalculator(entities, chunkGetter, calculator);
+            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
+            return preparedState.toSpawnState(calculator);
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot, fullChunkSnapshot);
+        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
         return state;
     }
 
@@ -359,17 +359,22 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     }
 
     @Unique
-    private @Nullable NaturalSpawner.SpawnState async$consumePreparedSpawnState(long currentTick) {
+    private @Nullable AsyncPreparedSpawnState async$consumePreparedSpawnState(long currentTick) {
         AsyncPreparedSpawnStateTask task = async$preparedSpawnStateTask;
         if (task == null) {
             return null;
         }
 
-        if (!task.future().isDone()) {
-            if (task.targetTick() < currentTick) {
+        // Prepared spawn state is only valid for its scheduled consume tick.
+        if (task.targetTick() < currentTick) {
+            if (!task.future().isDone()) {
                 task.future().cancel(true);
-                async$preparedSpawnStateTask = null;
             }
+            async$preparedSpawnStateTask = null;
+            return null;
+        }
+
+        if (!task.future().isDone()) {
             return null;
         }
 
@@ -379,7 +384,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         async$preparedSpawnStateTask = null;
         try {
-            return task.future().get().toSpawnState(this.chunkMap);
+            return task.future().get();
         } catch (CancellationException e) {
             return null;
         } catch (InterruptedException e) {
@@ -396,7 +401,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             long targetTick,
             int spawnableChunkCount,
             List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot,
-            Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot,
             AsyncPreparedFullChunkSnapshot fullChunkSnapshot
     ) {
         if (ParallelProcessor.isShuttingDown()) {
@@ -422,7 +426,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                             return AsyncPreparedSpawnStateBuilder.build(
                                     spawnableChunkCount,
                                     entitySnapshot,
-                                    playersNearChunkSnapshot,
                                     fullChunkSnapshot
                             );
                         } catch (CancellationException e) {
@@ -464,6 +467,29 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             ));
         }
         return entitySnapshot;
+    }
+
+    @Unique
+    private static void async$populateLocalMobCapCalculator(
+            Iterable<Entity> entities,
+            NaturalSpawner.ChunkGetter chunkGetter,
+            LocalMobCapCalculator calculator
+    ) {
+        for (Entity entity : entities) {
+            if (!(entity instanceof Mob mob)) {
+                continue;
+            }
+            if (mob.isPersistenceRequired() || mob.requiresCustomPersistence()) {
+                continue;
+            }
+
+            MobCategory category = mob.getType().getCategory();
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+
+            chunkGetter.query(ChunkPos.asLong(mob.blockPosition()), chunk -> calculator.addMob(chunk.getPos(), category));
+        }
     }
 
     @Unique
