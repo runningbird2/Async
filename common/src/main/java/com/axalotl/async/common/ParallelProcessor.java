@@ -44,6 +44,7 @@ public class ParallelProcessor {
     private static final LongAdder asyncEntityTickAbortCount = new LongAdder();
     private static final LongAdder asyncEntityTickCooldownCount = new LongAdder();
     private static final LongAdder asyncEntityTickSyncFallbackCount = new LongAdder();
+    private static final LongAdder asyncEntityTickSkippedCount = new LongAdder();
     private static final AtomicLong nextFallbackLogNanos = new AtomicLong(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
     private static final ThreadLocal<Boolean> IS_POOL_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IS_ENTITY_TICK_CONTEXT = ThreadLocal.withInitial(() -> Boolean.FALSE);
@@ -131,7 +132,7 @@ public class ParallelProcessor {
         int chunkSize = Math.max(1, (asyncEntities.size() + poolSize - 1) / poolSize);
 
         List<Future<Void>> futures = new ArrayList<>();
-        Queue<Entity> fallbackEntities = new ConcurrentLinkedQueue<>();
+        Queue<Entity> syncFallbackEntities = new ConcurrentLinkedQueue<>();
         int submittedUntil = 0;
         try {
             for (int i = 0; i < asyncEntities.size(); i += chunkSize) {
@@ -141,7 +142,7 @@ public class ParallelProcessor {
                     for (Entity entity : chunk) {
                         if (entity.isRemoved()) continue;
                         if (shouldTickSynchronously(entity)) {
-                            fallbackEntities.add(entity);
+                            syncFallbackEntities.add(entity);
                             continue;
                         }
                         try {
@@ -149,7 +150,7 @@ public class ParallelProcessor {
                         } catch (AsyncAbortException ignored) {
                             asyncEntityTickAbortCount.increment();
                             markEntityForSynchronousHandling(entity);
-                            fallbackEntities.add(entity);
+                            asyncEntityTickSkippedCount.increment();
                         }
                     }
                 });
@@ -173,6 +174,10 @@ public class ParallelProcessor {
                     LOGGER.error("Error in async entity tick", futureException);
                 }
             }
+            for (Entity entity : syncFallbackEntities) {
+                asyncEntityTickSyncFallbackCount.increment();
+                tickSynchronously(world, entity);
+            }
             return;
         }
 
@@ -194,7 +199,7 @@ public class ParallelProcessor {
             }
         }
 
-        for (Entity entity : fallbackEntities) {
+        for (Entity entity : syncFallbackEntities) {
             asyncEntityTickSyncFallbackCount.increment();
             tickSynchronously(world, entity);
         }
@@ -365,14 +370,16 @@ public class ParallelProcessor {
         long aborts = asyncEntityTickAbortCount.sumThenReset();
         long cooldowns = asyncEntityTickCooldownCount.sumThenReset();
         long syncFallbacks = asyncEntityTickSyncFallbackCount.sumThenReset();
-        if (aborts == 0L && cooldowns == 0L && syncFallbacks == 0L) {
+        long skippedTicks = asyncEntityTickSkippedCount.sumThenReset();
+        if (aborts == 0L && cooldowns == 0L && syncFallbacks == 0L && skippedTicks == 0L) {
             return;
         }
 
         LOGGER.info(
-                "Async entity tick fallbacks in last 5m: aborts={}, cooldowns={}, syncFallbackTicks={}, activeCooldownEntities={}",
+                "Async entity tick fallbacks in last 5m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}",
                 aborts,
                 cooldowns,
+                skippedTicks,
                 syncFallbacks,
                 temporarilySynchronizedEntities.size()
         );
@@ -398,6 +405,7 @@ public class ParallelProcessor {
         asyncEntityTickAbortCount.reset();
         asyncEntityTickCooldownCount.reset();
         asyncEntityTickSyncFallbackCount.reset();
+        asyncEntityTickSkippedCount.reset();
         nextFallbackLogNanos.set(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
         PortalTeleportationManager.shutdown();
     }
