@@ -115,8 +115,14 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             return;
         }
 
+        LevelChunk tickingChunk = holder.getTickingChunk();
+        if (tickingChunk != null) {
+            cir.setReturnValue(tickingChunk);
+            return;
+        }
+
         async$abortChunkWaitIfEntityTickThread();
-        cir.setReturnValue(holder.getTickingChunk());
+        cir.setReturnValue(null);
     }
 
     @Unique
