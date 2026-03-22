@@ -84,6 +84,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
             CompletableFuture<?> existingFuture = async$findPendingFuture(holder, leastStatus);
             if (existingFuture != null) {
+                async$abortChunkWaitIfEntityTickThread();
                 cir.setReturnValue(async$awaitWithProbing(existingFuture, pos, leastStatus));
                 return;
             }
@@ -93,6 +94,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             cir.setReturnValue(null);
             return;
         }
+        async$abortChunkWaitIfEntityTickThread();
         CompletableFuture<?> ticketTask = CompletableFuture.runAsync(() -> this.getChunkFutureMainThread(x, z, leastStatus, true), this.mainThreadProcessor);
         cir.setReturnValue(async$awaitAfterTicket(ticketTask, pos, leastStatus));
     }
@@ -113,6 +115,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             return;
         }
 
+        async$abortChunkWaitIfEntityTickThread();
         cir.setReturnValue(holder.getTickingChunk());
     }
 
@@ -179,6 +182,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private static void async$abortChunkWaitIfShuttingDown() {
         if (ParallelProcessor.isShuttingDown() || Thread.currentThread().isInterrupted()) {
             throw new CancellationException("Cancelled async chunk wait during shutdown");
+        }
+    }
+
+    @Unique
+    private static void async$abortChunkWaitIfEntityTickThread() {
+        if (ParallelProcessor.isEntityTickExecutionThread()) {
+            throw new ParallelProcessor.AsyncAbortException();
         }
     }
 

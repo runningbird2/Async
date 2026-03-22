@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class ParallelProcessor {
     public static final Logger LOGGER = LogManager.getLogger(ParallelProcessor.class);
+    private static final int ASYNC_ABORT_SYNC_COOLDOWN_TICKS = 5;
 
     @Setter
     private static MinecraftServer server;
@@ -35,8 +36,10 @@ public class ParallelProcessor {
     private static final AtomicInteger threadPoolID = new AtomicInteger();
     public static ExecutorService tickPool;
     private static final Set<UUID> blacklistedEntity = ConcurrentHashMap.newKeySet();
+    private static final Map<UUID, Integer> temporarilySynchronizedEntities = new ConcurrentHashMap<>();
     private static final Map<String, Set<WeakReference<Thread>>> mcThreadTracker = new ConcurrentHashMap<>();
     private static final ThreadLocal<Boolean> IS_POOL_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> IS_ENTITY_TICK_CONTEXT = ThreadLocal.withInitial(() -> Boolean.FALSE);
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,
@@ -82,6 +85,10 @@ public class ParallelProcessor {
         return IS_POOL_THREAD.get();
     }
 
+    public static boolean isEntityTickExecutionThread() {
+        return IS_ENTITY_TICK_CONTEXT.get();
+    }
+
     public static boolean isShuttingDown() {
         return isShuttingDown;
     }
@@ -117,6 +124,7 @@ public class ParallelProcessor {
         int chunkSize = Math.max(1, (asyncEntities.size() + poolSize - 1) / poolSize);
 
         List<Future<Void>> futures = new ArrayList<>();
+        Queue<Entity> fallbackEntities = new ConcurrentLinkedQueue<>();
         int submittedUntil = 0;
         try {
             for (int i = 0; i < asyncEntities.size(); i += chunkSize) {
@@ -125,7 +133,16 @@ public class ParallelProcessor {
                 Future<Void> future = (Future<Void>) tickPool.submit(() -> {
                     for (Entity entity : chunk) {
                         if (entity.isRemoved()) continue;
-                        performAsyncEntityTick(world, entity);
+                        if (shouldTickSynchronously(entity)) {
+                            fallbackEntities.add(entity);
+                            continue;
+                        }
+                        try {
+                            performAsyncEntityTick(world, entity);
+                        } catch (AsyncAbortException ignored) {
+                            markEntityForSynchronousHandling(entity);
+                            fallbackEntities.add(entity);
+                        }
                     }
                 });
                 futures.add(future);
@@ -162,8 +179,15 @@ public class ParallelProcessor {
             try {
                 future.get();
             } catch (Exception e) {
+                if (isAbortThrowable(e)) {
+                    continue;
+                }
                 LOGGER.error("Error in async entity tick", e);
             }
+        }
+
+        for (Entity entity : fallbackEntities) {
+            tickSynchronously(world, entity);
         }
     }
 
@@ -257,6 +281,14 @@ public class ParallelProcessor {
         }
 
         UUID entityId = entity.getUUID();
+        Integer syncUntilTick = temporarilySynchronizedEntities.get(entityId);
+        if (syncUntilTick != null) {
+            MinecraftServer currentServer = server;
+            if (currentServer == null || currentServer.getTickCount() < syncUntilTick) {
+                return true;
+            }
+            temporarilySynchronizedEntities.remove(entityId, syncUntilTick);
+        }
 
         return AsyncConfig.disabled ||
                 entity instanceof Projectile ||
@@ -291,11 +323,31 @@ public class ParallelProcessor {
 
     private static void performAsyncEntityTick(ServerLevel world, Entity entity) {
         currentEntities.incrementAndGet();
+        IS_ENTITY_TICK_CONTEXT.set(Boolean.TRUE);
         try {
             world.tickNonPassenger(entity);
         } finally {
+            IS_ENTITY_TICK_CONTEXT.set(Boolean.FALSE);
             currentEntities.decrementAndGet();
         }
+    }
+
+    private static void markEntityForSynchronousHandling(Entity entity) {
+        MinecraftServer currentServer = server;
+        if (currentServer == null) {
+            return;
+        }
+        temporarilySynchronizedEntities.put(entity.getUUID(), currentServer.getTickCount() + ASYNC_ABORT_SYNC_COOLDOWN_TICKS);
+    }
+
+    private static boolean isAbortThrowable(Throwable throwable) {
+        while (throwable != null) {
+            if (throwable instanceof AsyncAbortException) {
+                return true;
+            }
+            throwable = throwable.getCause();
+        }
+        return false;
     }
 
     @SuppressWarnings("ResultOfMethodCallIgnored")
@@ -304,6 +356,7 @@ public class ParallelProcessor {
         shutdownExecutor("tickPool", tickPool);
         AsyncConfig.clearCaches();
         blacklistedEntity.clear();
+        temporarilySynchronizedEntities.clear();
         PortalTeleportationManager.shutdown();
     }
 
@@ -338,5 +391,11 @@ public class ParallelProcessor {
 
     private static void logDespawnError(Entity entity, Throwable e) {
         LOGGER.error("{} Entity Type: {}, UUID: {}", "Error during despawn check", entity.getType().toString(), entity.getUUID(), e);
+    }
+
+    public static final class AsyncAbortException extends RuntimeException {
+        public AsyncAbortException() {
+            super(null, null, false, false);
+        }
     }
 }
