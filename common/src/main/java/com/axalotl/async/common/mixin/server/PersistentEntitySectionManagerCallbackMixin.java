@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.entity.EntityAccess;
+import net.minecraft.world.level.entity.EntitySection;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
@@ -21,7 +22,7 @@ public abstract class PersistentEntitySectionManagerCallbackMixin {
     private PersistentEntitySectionManager<?> async$outerManager;
 
     @Inject(method = "<init>", at = @At("TAIL"))
-    private void async$captureOuter(PersistentEntitySectionManager<?> outer, EntityAccess entity, long sectionKey, Object section, CallbackInfo ci) {
+    private void async$captureOuter(PersistentEntitySectionManager<?> outer, EntityAccess entity, long sectionKey, EntitySection<?> section, CallbackInfo ci) {
         this.async$outerManager = outer;
     }
 
