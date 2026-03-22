@@ -7,6 +7,7 @@ import com.axalotl.async.common.spawn.AsyncPreparedFullChunkSnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
@@ -468,6 +469,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     @Unique
     private Long2ObjectOpenHashMap<List<ServerPlayer>> async$capturePlayersNearChunkSnapshot() {
         Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = new Long2ObjectOpenHashMap<>();
+        LongOpenHashSet candidateChunks = new LongOpenHashSet();
         for (ServerPlayer player : this.level.players()) {
             if (player.isSpectator()) {
                 continue;
@@ -481,10 +483,19 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                         continue;
                     }
 
-                    playersNearChunkSnapshot.computeIfAbsent(chunkPos.toLong(), ignored -> new ArrayList<>()).add(player);
+                    candidateChunks.add(chunkPos.toLong());
                 }
             }
         }
+
+        for (long chunkPosLong : candidateChunks) {
+            List<ServerPlayer> players = this.chunkMap.getPlayersCloseForSpawning(new ChunkPos(chunkPosLong));
+            if (players.isEmpty()) {
+                continue;
+            }
+            playersNearChunkSnapshot.put(chunkPosLong, List.copyOf(players));
+        }
+
         return playersNearChunkSnapshot;
     }
 
