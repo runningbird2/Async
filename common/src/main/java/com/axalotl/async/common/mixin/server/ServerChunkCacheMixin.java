@@ -9,7 +9,6 @@ import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.SectionPos;
 import net.minecraft.server.level.*;
 import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.entity.Entity;
@@ -24,7 +23,6 @@ import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
-import net.minecraft.world.phys.Vec3;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -34,7 +32,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CancellationException;
@@ -267,15 +264,14 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         }
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
-        Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = async$capturePlayersNearChunkSnapshot();
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
-            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
+            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
+        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
         return state;
     }
 
@@ -392,8 +388,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private void async$schedulePreparedSpawnState(
             long targetTick,
             int spawnableChunkCount,
-            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot,
-            Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot
+            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot
     ) {
         if (ParallelProcessor.isShuttingDown()) {
             async$preparedSpawnStateTask = null;
@@ -418,7 +413,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                             return AsyncPreparedSpawnStateBuilder.build(
                                     spawnableChunkCount,
                                     entitySnapshot,
-                                    playersNearChunkSnapshot,
                                     this.level
                             );
                         } catch (CancellationException e) {
@@ -460,37 +454,5 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             ));
         }
         return entitySnapshot;
-    }
-
-    @Unique
-    private Long2ObjectOpenHashMap<List<ServerPlayer>> async$capturePlayersNearChunkSnapshot() {
-        Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = new Long2ObjectOpenHashMap<>();
-        for (ServerPlayer player : this.level.players()) {
-            if (player.isSpectator()) {
-                continue;
-            }
-
-            ChunkPos playerChunkPos = player.chunkPosition();
-            for (int dx = -NaturalSpawner.SPAWN_DISTANCE_CHUNK; dx <= NaturalSpawner.SPAWN_DISTANCE_CHUNK; dx++) {
-                for (int dz = -NaturalSpawner.SPAWN_DISTANCE_CHUNK; dz <= NaturalSpawner.SPAWN_DISTANCE_CHUNK; dz++) {
-                    ChunkPos chunkPos = new ChunkPos(playerChunkPos.x + dx, playerChunkPos.z + dz);
-                    if (!async$isPlayerCloseEnoughForSpawning(player.position(), chunkPos)) {
-                        continue;
-                    }
-
-                    playersNearChunkSnapshot.computeIfAbsent(chunkPos.toLong(), ignored -> new ArrayList<>()).add(player);
-                }
-            }
-        }
-        return playersNearChunkSnapshot;
-    }
-
-    @Unique
-    private static boolean async$isPlayerCloseEnoughForSpawning(Vec3 playerPosition, ChunkPos chunkPos) {
-        double chunkCenterX = SectionPos.sectionToBlockCoord(chunkPos.x, 8);
-        double chunkCenterZ = SectionPos.sectionToBlockCoord(chunkPos.z, 8);
-        double deltaX = chunkCenterX - playerPosition.x;
-        double deltaZ = chunkCenterZ - playerPosition.z;
-        return deltaX * deltaX + deltaZ * deltaZ < 16384.0;
     }
 }

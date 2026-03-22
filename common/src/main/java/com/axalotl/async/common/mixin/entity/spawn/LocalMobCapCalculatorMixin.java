@@ -4,9 +4,9 @@ import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
 import com.axalotl.async.common.spawn.AsyncMobCounts;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
-import it.unimi.dsi.fastutil.objects.Object2ObjectMap;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,20 +27,21 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
     private ChunkMap chunkMap;
 
     @Override
-    public void async$applyPlayerSnapshot(
-            Long2ObjectMap<List<ServerPlayer>> playersNearChunkSnapshot,
-            Object2ObjectMap<ServerPlayer, int[]> playerMobCountsSnapshot
-    ) {
+    public void async$applyChunkCounts(Long2ObjectMap<int[]> chunkMobCounts) {
         this.playersNearChunk.clear();
-        for (Long2ObjectMap.Entry<List<ServerPlayer>> entry : Long2ObjectMaps.fastIterable(playersNearChunkSnapshot)) {
-            this.playersNearChunk.put(entry.getLongKey(), entry.getValue());
-        }
-
         this.playerMobCounts.clear();
-        for (Object2ObjectMap.Entry<ServerPlayer, int[]> entry : playerMobCountsSnapshot.object2ObjectEntrySet()) {
-            LocalMobCapCalculator.MobCounts mobCounts = MobCountsConstructorInvoker.async$createMobCounts();
-            ((AsyncMobCounts) mobCounts).async$addCounts(entry.getValue());
-            this.playerMobCounts.put(entry.getKey(), mobCounts);
+        for (Long2ObjectMap.Entry<int[]> entry : Long2ObjectMaps.fastIterable(chunkMobCounts)) {
+            long chunkLong = entry.getLongKey();
+            ChunkPos chunkPos = new ChunkPos(chunkLong);
+            List<ServerPlayer> players = this.playersNearChunk.computeIfAbsent(chunkLong, ignored -> this.chunkMap.getPlayersCloseForSpawning(chunkPos));
+            if (players == null || players.isEmpty()) {
+                continue;
+            }
+            int[] counts = entry.getValue();
+            for (ServerPlayer player : players) {
+                LocalMobCapCalculator.MobCounts mobCounts = this.playerMobCounts.computeIfAbsent(player, ignored -> MobCountsConstructorInvoker.async$createMobCounts());
+                ((AsyncMobCounts) mobCounts).async$addCounts(counts);
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.axalotl.async.common;
 
 import com.axalotl.async.common.config.AsyncConfig;
+import com.axalotl.async.common.parallelised.utils.AsyncNavigationTracker;
 import com.axalotl.async.common.parallelised.utils.PortalTeleportationManager;
 import lombok.Setter;
 import net.minecraft.server.MinecraftServer;
@@ -8,6 +9,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.monster.Shulker;
 import net.minecraft.world.entity.projectile.Projectile;
@@ -310,6 +312,7 @@ public class ParallelProcessor {
                 entity instanceof Projectile ||
                 entity instanceof AbstractMinecart ||
                 entity instanceof ServerPlayer ||
+                entity instanceof Mob mob && entity.level() instanceof AsyncNavigationTracker navigationTracker && navigationTracker.async$isNavigationActive(mob) ||
                 BLOCKED_ENTITIES.contains(entity.getClass()) ||
                 blacklistedEntity.contains(entityId) ||
                 AsyncConfig.isEntitySynchronized(EntityType.getKey(entity.getType()));
