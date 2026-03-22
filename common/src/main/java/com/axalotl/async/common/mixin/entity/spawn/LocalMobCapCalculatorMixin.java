@@ -28,13 +28,17 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
     ) {
         this.playersNearChunk.clear();
         this.playerMobCounts.clear();
+
+        for (Long2ObjectMap.Entry<List<ServerPlayer>> entry : Long2ObjectMaps.fastIterable(playersNearChunkSnapshot)) {
+            this.playersNearChunk.put(entry.getLongKey(), entry.getValue());
+        }
+
         for (Long2ObjectMap.Entry<int[]> entry : Long2ObjectMaps.fastIterable(chunkMobCounts)) {
             long chunkLong = entry.getLongKey();
             List<ServerPlayer> players = playersNearChunkSnapshot.get(chunkLong);
             if (players == null || players.isEmpty()) {
                 continue;
             }
-            this.playersNearChunk.put(chunkLong, players);
             int[] counts = entry.getValue();
             for (ServerPlayer player : players) {
                 LocalMobCapCalculator.MobCounts mobCounts = this.playerMobCounts.computeIfAbsent(player, ignored -> MobCountsConstructorInvoker.async$createMobCounts());
