@@ -5,6 +5,7 @@ import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
+import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
@@ -347,19 +348,19 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             return null;
         }
 
-        if (task.targetTick < currentTick) {
-            task.future.cancel(true);
+        if (task.targetTick() < currentTick) {
+            task.future().cancel(true);
             async$preparedSpawnStateTask = null;
             return null;
         }
 
-        if (task.targetTick != currentTick || !task.future.isDone()) {
+        if (task.targetTick() != currentTick || !task.future().isDone()) {
             return null;
         }
 
         async$preparedSpawnStateTask = null;
         try {
-            return task.future.get().toSpawnState(this.chunkMap);
+            return task.future().get().toSpawnState(this.chunkMap);
         } catch (CancellationException e) {
             return null;
         } catch (InterruptedException e) {
@@ -385,11 +386,11 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         AsyncPreparedSpawnStateTask existingTask = async$preparedSpawnStateTask;
         if (existingTask != null) {
-            if (existingTask.targetTick >= targetTick) {
+            if (existingTask.targetTick() >= targetTick) {
                 return;
             }
-            if (!existingTask.future.isDone()) {
-                existingTask.future.cancel(true);
+            if (!existingTask.future().isDone()) {
+                existingTask.future().cancel(true);
                 async$preparedSpawnStateTask = null;
             }
         }
@@ -475,9 +476,5 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         double deltaX = chunkCenterX - playerPosition.x;
         double deltaZ = chunkCenterZ - playerPosition.z;
         return deltaX * deltaX + deltaZ * deltaZ < 16384.0;
-    }
-
-    @Unique
-    private record AsyncPreparedSpawnStateTask(long targetTick, Future<AsyncPreparedSpawnState> future) {
     }
 }

@@ -1,18 +1,16 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
 import com.axalotl.async.common.spawn.AsyncMobCounts;
-import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.LocalMobCapCalculator;
-import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 
 @Mixin(LocalMobCapCalculator.MobCounts.class)
 public abstract class MobCountsMixin implements AsyncMobCounts {
 
-    @Shadow @Final
-    private Object2IntMap<MobCategory> counts;
+    @Shadow
+    public abstract void add(MobCategory mobCategory);
 
     @Override
     public void async$addCounts(int[] categoryCounts) {
@@ -22,7 +20,9 @@ public abstract class MobCountsMixin implements AsyncMobCounts {
             int count = categoryCounts[i];
             if (count != 0) {
                 MobCategory category = values[i];
-                this.counts.put(category, this.counts.getOrDefault(category, 0) + count);
+                for (int j = 0; j < count; j++) {
+                    this.add(category);
+                }
             }
         }
     }
