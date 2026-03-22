@@ -10,8 +10,7 @@ public record AsyncPreparedSpawnEntitySnapshot(
         BlockPos blockPos,
         long chunkPosLong,
         EntityType<?> entityType,
-        MobCategory category,
-        boolean countsTowardLocalCap
+        MobCategory category
 ) {
 
     public AsyncPreparedSpawnEntitySnapshot {
