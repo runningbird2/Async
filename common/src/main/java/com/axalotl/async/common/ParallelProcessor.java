@@ -357,6 +357,18 @@ public class ParallelProcessor {
         temporarilySynchronizedEntities.put(entity.getUUID(), currentServer.getTickCount() + ASYNC_ABORT_SYNC_COOLDOWN_TICKS);
     }
 
+    private static int pruneExpiredSynchronousCooldowns() {
+        MinecraftServer currentServer = server;
+        if (currentServer == null) {
+            temporarilySynchronizedEntities.clear();
+            return 0;
+        }
+
+        int currentTick = currentServer.getTickCount();
+        temporarilySynchronizedEntities.entrySet().removeIf(entry -> entry.getValue() <= currentTick);
+        return temporarilySynchronizedEntities.size();
+    }
+
     private static void maybeLogFallbackSummary() {
         long now = System.nanoTime();
         long nextLogAt = nextFallbackLogNanos.get();
@@ -371,7 +383,8 @@ public class ParallelProcessor {
         long cooldowns = asyncEntityTickCooldownCount.sumThenReset();
         long syncFallbacks = asyncEntityTickSyncFallbackCount.sumThenReset();
         long skippedTicks = asyncEntityTickSkippedCount.sumThenReset();
-        if (aborts == 0L && cooldowns == 0L && syncFallbacks == 0L && skippedTicks == 0L) {
+        int activeCooldownEntities = pruneExpiredSynchronousCooldowns();
+        if (aborts == 0L && cooldowns == 0L && syncFallbacks == 0L && skippedTicks == 0L && activeCooldownEntities == 0) {
             return;
         }
 
@@ -381,7 +394,7 @@ public class ParallelProcessor {
                 cooldowns,
                 skippedTicks,
                 syncFallbacks,
-                temporarilySynchronizedEntities.size()
+                activeCooldownEntities
         );
     }
 
