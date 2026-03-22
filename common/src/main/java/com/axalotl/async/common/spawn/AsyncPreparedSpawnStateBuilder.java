@@ -6,6 +6,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.PotentialCalculator;
@@ -23,6 +24,7 @@ public final class AsyncPreparedSpawnStateBuilder {
     public static AsyncPreparedSpawnState build(
             int spawnableChunkCount,
             List<AsyncPreparedSpawnEntitySnapshot> entities,
+            Long2ObjectMap<List<ServerPlayer>> playersNearChunkSnapshot,
             ServerLevel level
     ) {
         async$abortIfCancelled();
@@ -51,6 +53,12 @@ public final class AsyncPreparedSpawnStateBuilder {
             if (!entity.countsTowardLocalCap()) {
                 continue;
             }
+
+            List<ServerPlayer> players = playersNearChunkSnapshot.get(entity.chunkPosLong());
+            if (players == null || players.isEmpty()) {
+                continue;
+            }
+
             chunkMobCounts.computeIfAbsent(entity.chunkPosLong(), ignored -> new int[MobCategory.values().length])[category.ordinal()]++;
         }
 
@@ -58,6 +66,7 @@ public final class AsyncPreparedSpawnStateBuilder {
                 spawnableChunkCount,
                 mobCategoryCounts,
                 spawnPotential,
+                new Long2ObjectOpenHashMap<>(playersNearChunkSnapshot),
                 chunkMobCounts
         );
     }

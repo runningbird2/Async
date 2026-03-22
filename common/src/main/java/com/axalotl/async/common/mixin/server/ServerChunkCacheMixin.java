@@ -6,6 +6,7 @@ import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
@@ -264,14 +265,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         }
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
+        Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = async$capturePlayersNearChunkSnapshot();
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
-            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
+            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
+        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, playersNearChunkSnapshot);
         return state;
     }
 
@@ -388,7 +390,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private void async$schedulePreparedSpawnState(
             long targetTick,
             int spawnableChunkCount,
-            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot
+            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot,
+            Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot
     ) {
         if (ParallelProcessor.isShuttingDown()) {
             async$preparedSpawnStateTask = null;
@@ -413,6 +416,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                             return AsyncPreparedSpawnStateBuilder.build(
                                     spawnableChunkCount,
                                     entitySnapshot,
+                                    playersNearChunkSnapshot,
                                     this.level
                             );
                         } catch (CancellationException e) {
@@ -454,5 +458,37 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             ));
         }
         return entitySnapshot;
+    }
+
+    @Unique
+    private Long2ObjectOpenHashMap<List<ServerPlayer>> async$capturePlayersNearChunkSnapshot() {
+        Long2ObjectOpenHashMap<List<ServerPlayer>> playersNearChunkSnapshot = new Long2ObjectOpenHashMap<>();
+        for (ServerPlayer player : this.level.players()) {
+            if (player.isSpectator()) {
+                continue;
+            }
+
+            ChunkPos playerChunkPos = player.chunkPosition();
+            for (int dx = -NaturalSpawner.SPAWN_DISTANCE_CHUNK; dx <= NaturalSpawner.SPAWN_DISTANCE_CHUNK; dx++) {
+                for (int dz = -NaturalSpawner.SPAWN_DISTANCE_CHUNK; dz <= NaturalSpawner.SPAWN_DISTANCE_CHUNK; dz++) {
+                    ChunkPos chunkPos = new ChunkPos(playerChunkPos.x + dx, playerChunkPos.z + dz);
+                    if (!async$isPlayerCloseEnoughForSpawning(player.position(), chunkPos)) {
+                        continue;
+                    }
+
+                    playersNearChunkSnapshot.computeIfAbsent(chunkPos.toLong(), ignored -> new ArrayList<>()).add(player);
+                }
+            }
+        }
+        return playersNearChunkSnapshot;
+    }
+
+    @Unique
+    private static boolean async$isPlayerCloseEnoughForSpawning(net.minecraft.world.phys.Vec3 playerPos, ChunkPos chunkPos) {
+        double chunkCenterX = (chunkPos.x << 4) + 8;
+        double chunkCenterZ = (chunkPos.z << 4) + 8;
+        double dx = chunkCenterX - playerPos.x;
+        double dz = chunkCenterZ - playerPos.z;
+        return dx * dx + dz * dz < 16384.0;
     }
 }
