@@ -1,16 +1,13 @@
 package com.axalotl.async.common.spawn;
 
 import com.axalotl.async.common.ParallelProcessor;
-import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.PotentialCalculator;
 import net.minecraft.world.level.biome.MobSpawnSettings;
-import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.util.List;
 import java.util.concurrent.CancellationException;
@@ -23,7 +20,7 @@ public final class AsyncPreparedSpawnStateBuilder {
     public static AsyncPreparedSpawnState build(
             int spawnableChunkCount,
             List<AsyncPreparedSpawnEntitySnapshot> entities,
-            ServerLevel level
+            AsyncPreparedFullChunkSnapshot fullChunkSnapshot
     ) {
         async$abortIfCancelled();
         PotentialCalculator spawnPotential = new PotentialCalculator();
@@ -33,7 +30,7 @@ public final class AsyncPreparedSpawnStateBuilder {
         for (AsyncPreparedSpawnEntitySnapshot entity : entities) {
             async$abortIfCancelled();
             BlockPos blockPos = entity.blockPos();
-            LevelChunk chunk = level.getChunkSource().getChunkNow(blockPos.getX() >> 4, blockPos.getZ() >> 4);
+            var chunk = fullChunkSnapshot.get(entity.chunkPosLong());
             if (chunk == null) {
                 continue;
             }

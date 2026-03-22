@@ -50,6 +50,7 @@ public class ParallelProcessor {
     private static final AtomicLong nextFallbackLogNanos = new AtomicLong(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
     private static final ThreadLocal<Boolean> IS_POOL_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IS_ENTITY_TICK_CONTEXT = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Long> CURRENT_ENTITY_CHUNK_POS = ThreadLocal.withInitial(() -> Long.MIN_VALUE);
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,
@@ -97,6 +98,23 @@ public class ParallelProcessor {
 
     public static boolean isEntityTickExecutionThread() {
         return IS_ENTITY_TICK_CONTEXT.get();
+    }
+
+    public static boolean canAccessChunkForAsyncEntityTick(long chunkPosLong) {
+        if (!isEntityTickExecutionThread()) {
+            return true;
+        }
+
+        long currentChunkPos = CURRENT_ENTITY_CHUNK_POS.get();
+        if (currentChunkPos == Long.MIN_VALUE) {
+            return false;
+        }
+
+        int currentChunkX = (int) currentChunkPos;
+        int currentChunkZ = (int) (currentChunkPos >> 32);
+        int requestedChunkX = (int) chunkPosLong;
+        int requestedChunkZ = (int) (chunkPosLong >> 32);
+        return Math.abs(currentChunkX - requestedChunkX) <= 1 && Math.abs(currentChunkZ - requestedChunkZ) <= 1;
     }
 
     public static boolean isShuttingDown() {
@@ -343,9 +361,11 @@ public class ParallelProcessor {
     private static void performAsyncEntityTick(ServerLevel world, Entity entity) {
         currentEntities.incrementAndGet();
         IS_ENTITY_TICK_CONTEXT.set(Boolean.TRUE);
+        CURRENT_ENTITY_CHUNK_POS.set(entity.chunkPosition().toLong());
         try {
             world.tickNonPassenger(entity);
         } finally {
+            CURRENT_ENTITY_CHUNK_POS.set(Long.MIN_VALUE);
             IS_ENTITY_TICK_CONTEXT.set(Boolean.FALSE);
             currentEntities.decrementAndGet();
         }

@@ -3,9 +3,11 @@ package com.axalotl.async.common.mixin.server;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
+import com.axalotl.async.common.spawn.AsyncPreparedFullChunkSnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.core.BlockPos;
@@ -35,12 +37,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicReferenceArray;
-import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
 @Mixin(value = ServerChunkCache.class, priority = 1500)
@@ -48,18 +47,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
     @Shadow @Final public ChunkMap chunkMap;
     @Shadow @Final Thread mainThread;
-    @Shadow @Final public ServerChunkCache.MainThreadExecutor mainThreadProcessor;
     @Shadow @Final private ServerLevel level;
 
     @Shadow public abstract @Nullable ChunkHolder getVisibleChunkIfPresent(long pos);
-    @Shadow protected abstract CompletableFuture<ChunkResult<ChunkAccess>> getChunkFutureMainThread(int x, int z, ChunkStatus leastStatus, boolean create);
     @Shadow public abstract void tickSpawningChunk(LevelChunk chunk, long timeInhabited, List<MobCategory> spawnCategories, NaturalSpawner.SpawnState spawnState);
 
     @Unique private volatile @Nullable AsyncPreparedSpawnStateTask async$preparedSpawnStateTask;
     @Unique private long async$spawnStateTick;
-
-    @Unique private static final long INITIAL_PARK_NS = 50_000L;
-    @Unique private static final long MAX_PARK_NS = 1_000_000L;
 
     @Inject(
             method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
@@ -67,41 +61,42 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             cancellable = true
     )
     private void async$getChunk(int x, int z, ChunkStatus leastStatus, boolean create, CallbackInfoReturnable<ChunkAccess> cir) {
-        if (Thread.currentThread() == this.mainThread) return;
+        if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
 
         long pos = ChunkPos.asLong(x, z);
-        ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
+        if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+            throw new ParallelProcessor.AsyncAbortException();
+        }
 
+        ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
         if (holder != null) {
             ChunkAccess ready = async$extractReady(holder, leastStatus);
             if (ready != null) {
                 cir.setReturnValue(ready);
                 return;
             }
-
-            CompletableFuture<?> existingFuture = async$findPendingFuture(holder, leastStatus);
-            if (existingFuture != null) {
-                async$abortChunkWaitIfEntityTickThread();
-                cir.setReturnValue(async$awaitWithProbing(existingFuture, pos, leastStatus));
-                return;
-            }
         }
 
-        if (!create) {
-            cir.setReturnValue(null);
-            return;
+        if (create && ParallelProcessor.isEntityTickExecutionThread()) {
+            throw new ParallelProcessor.AsyncAbortException();
         }
-        async$abortChunkWaitIfEntityTickThread();
-        CompletableFuture<?> ticketTask = CompletableFuture.runAsync(() -> this.getChunkFutureMainThread(x, z, leastStatus, true), this.mainThreadProcessor);
-        cir.setReturnValue(async$awaitAfterTicket(ticketTask, pos, leastStatus));
+        cir.setReturnValue(null);
     }
 
     @Inject(method = "getChunkNow", at = @At("HEAD"), cancellable = true)
     private void async$getChunkNow(int chunkX, int chunkZ, CallbackInfoReturnable<LevelChunk> cir) {
-        if (Thread.currentThread() == this.mainThread) return;
+        if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
 
-        ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(chunkX, chunkZ));
+        long pos = ChunkPos.asLong(chunkX, chunkZ);
+        if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+            throw new ParallelProcessor.AsyncAbortException();
+        }
+
+        ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
         if (holder == null) {
+            if (ParallelProcessor.isEntityTickExecutionThread()) {
+                throw new ParallelProcessor.AsyncAbortException();
+            }
             cir.setReturnValue(null);
             return;
         }
@@ -118,81 +113,10 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             return;
         }
 
-        async$abortChunkWaitIfEntityTickThread();
-        cir.setReturnValue(null);
-    }
-
-    @Unique
-    private @Nullable ChunkAccess async$awaitAfterTicket(CompletableFuture<?> ticketTask, long pos, ChunkStatus status) {
-        long sleepNs = INITIAL_PARK_NS;
-        for (;;) {
-            async$abortChunkWaitIfShuttingDown();
-            if (ticketTask.isCompletedExceptionally()) {
-                ticketTask.join();
-            }
-
-            ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
-            if (holder != null) {
-                ChunkAccess ready = async$extractReady(holder, status);
-                if (ready != null) return ready;
-
-                CompletableFuture<?> directFuture = async$findPendingFuture(holder, status);
-                if (directFuture != null) {
-                    return async$awaitWithProbing(directFuture, pos, status);
-                }
-                ChunkAccess fromHolder = async$extractCompleted(holder, status);
-                if (fromHolder != null) return fromHolder;
-            }
-
-            LockSupport.parkNanos(sleepNs);
-            sleepNs = Math.min(sleepNs << 1, MAX_PARK_NS);
-        }
-    }
-
-    @Unique
-    private static @Nullable CompletableFuture<?> async$findPendingFuture(ChunkHolder holder, ChunkStatus status) {
-        AtomicReferenceArray<?> futures = holder.futures;
-        CompletableFuture<?> genFuture = (CompletableFuture<?>) futures.get(status.getIndex());
-        if (genFuture != null && !genFuture.isDone()) {
-            return genFuture;
-        }
-        if (status == ChunkStatus.FULL) {
-            CompletableFuture<?> fullFuture = holder.getFullChunkFuture();
-            if (!fullFuture.isDone()) {
-                return fullFuture;
-            }
-        }
-        return null;
-    }
-
-    @Unique
-    private @Nullable ChunkAccess async$awaitWithProbing(CompletableFuture<?> future, long pos, ChunkStatus status) {
-        long sleepNs = INITIAL_PARK_NS;
-        while (!future.isDone()) {
-            async$abortChunkWaitIfShuttingDown();
-            ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
-            if (holder != null) {
-                ChunkAccess ready = async$extractReady(holder, status);
-                if (ready != null) return ready;
-            }
-            LockSupport.parkNanos(sleepNs);
-            sleepNs = Math.min(sleepNs << 1, MAX_PARK_NS);
-        }
-        return async$extractFromFuture(future);
-    }
-
-    @Unique
-    private static void async$abortChunkWaitIfShuttingDown() {
-        if (ParallelProcessor.isShuttingDown() || Thread.currentThread().isInterrupted()) {
-            throw new CancellationException("Cancelled async chunk wait during shutdown");
-        }
-    }
-
-    @Unique
-    private static void async$abortChunkWaitIfEntityTickThread() {
         if (ParallelProcessor.isEntityTickExecutionThread()) {
             throw new ParallelProcessor.AsyncAbortException();
         }
+        cir.setReturnValue(null);
     }
 
     @Unique
@@ -205,32 +129,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (status == ChunkStatus.FULL) {
             LevelChunk ticking = holder.getTickingChunk();
             if (ticking != null) return ticking;
-        }
-        return null;
-    }
-
-    @Unique
-    private static @Nullable ChunkAccess async$extractCompleted(ChunkHolder holder, ChunkStatus status) {
-        AtomicReferenceArray<?> futures = holder.futures;
-        CompletableFuture<?> future = (CompletableFuture<?>) futures.get(status.getIndex());
-        if (future != null && future.isDone()) {
-            return async$extractFromFuture(future);
-        }
-        if (status == ChunkStatus.FULL) {
-            CompletableFuture<?> fullFuture = holder.getFullChunkFuture();
-            if (fullFuture.isDone()) {
-                return async$extractFromFuture(fullFuture);
-            }
-        }
-        return null;
-    }
-
-    @Unique
-    private static @Nullable ChunkAccess async$extractFromFuture(CompletableFuture<?> future) {
-        Object raw = future.join();
-        if (raw instanceof ChunkResult<?> result) {
-            Object chunk = result.orElse(null);
-            if (chunk instanceof ChunkAccess ca) return async$unwrap(ca);
         }
         return null;
     }
@@ -264,14 +162,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         }
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
+        AsyncPreparedFullChunkSnapshot fullChunkSnapshot = async$captureReadyFullChunkSnapshot(entitySnapshot);
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
-            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
+            async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot);
+        async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
         return state;
     }
 
@@ -388,7 +287,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private void async$schedulePreparedSpawnState(
             long targetTick,
             int spawnableChunkCount,
-            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot
+            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot,
+            AsyncPreparedFullChunkSnapshot fullChunkSnapshot
     ) {
         if (ParallelProcessor.isShuttingDown()) {
             async$preparedSpawnStateTask = null;
@@ -413,7 +313,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                             return AsyncPreparedSpawnStateBuilder.build(
                                     spawnableChunkCount,
                                     entitySnapshot,
-                                    this.level
+                                    fullChunkSnapshot
                             );
                         } catch (CancellationException e) {
                             throw e;
@@ -428,6 +328,28 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             ParallelProcessor.LOGGER.warn("Async spawn-state build unavailable, falling back to synchronous createState", e);
             async$preparedSpawnStateTask = null;
         }
+    }
+
+    @Unique
+    private AsyncPreparedFullChunkSnapshot async$captureReadyFullChunkSnapshot(List<AsyncPreparedSpawnEntitySnapshot> entities) {
+        Long2ObjectOpenHashMap<LevelChunk> chunks = new Long2ObjectOpenHashMap<>();
+        for (AsyncPreparedSpawnEntitySnapshot entity : entities) {
+            long chunkPosLong = entity.chunkPosLong();
+            if (chunks.containsKey(chunkPosLong)) {
+                continue;
+            }
+
+            ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPosLong);
+            if (holder == null) {
+                continue;
+            }
+
+            LevelChunk chunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+            if (chunk != null) {
+                chunks.put(chunkPosLong, chunk);
+            }
+        }
+        return new AsyncPreparedFullChunkSnapshot(chunks);
     }
 
     @Unique
