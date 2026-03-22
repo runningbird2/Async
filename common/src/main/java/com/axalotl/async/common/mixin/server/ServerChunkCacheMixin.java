@@ -362,13 +362,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             return null;
         }
 
-        if (task.targetTick() < currentTick) {
-            task.future().cancel(true);
-            async$preparedSpawnStateTask = null;
+        if (!task.future().isDone()) {
+            if (task.targetTick() < currentTick) {
+                task.future().cancel(true);
+                async$preparedSpawnStateTask = null;
+            }
             return null;
         }
 
-        if (task.targetTick() != currentTick || !task.future().isDone()) {
+        if (task.targetTick() > currentTick) {
             return null;
         }
 
