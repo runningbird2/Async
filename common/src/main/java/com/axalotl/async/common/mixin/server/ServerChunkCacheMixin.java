@@ -7,6 +7,7 @@ import com.axalotl.async.common.spawn.AsyncPreparedFullChunkSnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import com.axalotl.async.common.spawn.LocalMobCapTelemetry;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
@@ -434,11 +435,12 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         summary.append("]");
         String topMonsterOwners = async$describeTopMonsterOwners(entities);
         ParallelProcessor.LOGGER.info(
-                "Spawn diagnostics in last 1m: asyncSpawnEnabled={}, spawnableChunks={}, categoryCounts={}, topMonsterOwners={}",
+                "Spawn diagnostics in last 1m: asyncSpawnEnabled={}, spawnableChunks={}, categoryCounts={}, topMonsterOwners={}, localCap={}",
                 AsyncConfig.enableAsyncSpawn,
                 spawnableChunkCount,
                 summary,
-                topMonsterOwners
+                topMonsterOwners,
+                LocalMobCapTelemetry.describeAndReset()
         );
     }
 

@@ -1,11 +1,14 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
 import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
+import com.axalotl.async.common.spawn.AsyncLocalMobCapInspector;
 import com.axalotl.async.common.spawn.AsyncMobCounts;
+import com.axalotl.async.common.spawn.AsyncMobCountsInspector;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
 import org.spongepowered.asm.mixin.Final;
@@ -16,7 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 @Mixin(LocalMobCapCalculator.class)
-public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalculator {
+public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalculator, AsyncLocalMobCapInspector {
     @Shadow @Final
     private Map<ServerPlayer, LocalMobCapCalculator.MobCounts> playerMobCounts;
 
@@ -27,13 +30,28 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
     private ChunkMap chunkMap;
 
     @Override
+    public List<ServerPlayer> async$getPlayersNear(ChunkPos chunkPos) {
+        long chunkLong = chunkPos.toLong();
+        return this.playersNearChunk.computeIfAbsent(chunkLong, ignored -> this.chunkMap.getPlayersCloseForSpawning(chunkPos));
+    }
+
+    @Override
+    public int async$getMobCount(ServerPlayer player, MobCategory mobCategory) {
+        LocalMobCapCalculator.MobCounts mobCounts = this.playerMobCounts.get(player);
+        if (mobCounts == null) {
+            return 0;
+        }
+        return ((AsyncMobCountsInspector) mobCounts).async$getCount(mobCategory);
+    }
+
+    @Override
     public void async$applyChunkCounts(Long2ObjectMap<int[]> chunkMobCounts) {
         this.playersNearChunk.clear();
         this.playerMobCounts.clear();
         for (Long2ObjectMap.Entry<int[]> entry : Long2ObjectMaps.fastIterable(chunkMobCounts)) {
             long chunkLong = entry.getLongKey();
             ChunkPos chunkPos = new ChunkPos(chunkLong);
-            List<ServerPlayer> players = this.playersNearChunk.computeIfAbsent(chunkLong, ignored -> this.chunkMap.getPlayersCloseForSpawning(chunkPos));
+            List<ServerPlayer> players = this.async$getPlayersNear(chunkPos);
             if (players == null || players.isEmpty()) {
                 continue;
             }
