@@ -4,6 +4,9 @@ import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
 import com.axalotl.async.common.spawn.AsyncLocalMobCapInspector;
 import com.axalotl.async.common.spawn.AsyncMobCounts;
 import com.axalotl.async.common.spawn.AsyncMobCountsInspector;
+import com.axalotl.async.common.spawn.LocalMobCapTelemetry;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMaps;
 import net.minecraft.server.level.ChunkMap;
@@ -61,5 +64,14 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
                 ((AsyncMobCounts) mobCounts).async$addCounts(counts);
             }
         }
+    }
+
+    @WrapMethod(method = "canSpawn")
+    private boolean async$traceCanSpawn(MobCategory mobCategory, ChunkPos chunkPos, Operation<Boolean> original) {
+        boolean allowed = original.call(mobCategory, chunkPos);
+        if (mobCategory == MobCategory.MONSTER) {
+            LocalMobCapTelemetry.recordMonsterCheck(chunkPos, this.async$getPlayersNear(chunkPos), this, allowed);
+        }
+        return allowed;
     }
 }

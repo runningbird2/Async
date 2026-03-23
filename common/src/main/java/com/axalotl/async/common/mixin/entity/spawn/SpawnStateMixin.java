@@ -1,7 +1,5 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
-import com.axalotl.async.common.spawn.AsyncLocalMobCapInspector;
-import com.axalotl.async.common.spawn.LocalMobCapTelemetry;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
@@ -9,7 +7,6 @@ import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.QuartPos;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobCategory;
@@ -28,7 +25,6 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.util.List;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
 @Mixin(NaturalSpawner.SpawnState.class)
@@ -82,15 +78,5 @@ public class SpawnStateMixin {
             }
         }
         return Object2IntMaps.unmodifiable(result);
-    }
-
-    @WrapMethod(method = "canSpawnForCategoryLocal")
-    private boolean async$canSpawnForCategoryLocal(MobCategory mobCategory, ChunkPos chunkPos, Operation<Boolean> original) {
-        boolean allowed = original.call(mobCategory, chunkPos);
-        if (mobCategory == MobCategory.MONSTER && this.localMobCapCalculator instanceof AsyncLocalMobCapInspector inspector) {
-            List<ServerPlayer> players = inspector.async$getPlayersNear(chunkPos);
-            LocalMobCapTelemetry.recordMonsterCheck(chunkPos, players, inspector, allowed);
-        }
-        return allowed;
     }
 }
