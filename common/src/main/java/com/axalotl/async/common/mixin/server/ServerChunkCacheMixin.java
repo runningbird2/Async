@@ -65,6 +65,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         long pos = ChunkPos.asLong(x, z);
         if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+            ParallelProcessor.recordAsyncEntityTickAbort("distance_getChunk", pos);
             throw new ParallelProcessor.AsyncAbortException();
         }
 
@@ -77,8 +78,12 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             }
         }
 
-        if (create && ParallelProcessor.isEntityTickExecutionThread()) {
-            throw new ParallelProcessor.AsyncAbortException();
+        if (ParallelProcessor.isEntityTickExecutionThread()) {
+            if (create) {
+                ParallelProcessor.recordAsyncEntityTickAbort(holder == null ? "create_missing_getChunk" : "create_not_ready_getChunk", pos);
+                throw new ParallelProcessor.AsyncAbortException();
+            }
+            ParallelProcessor.recordAsyncEntityTickReadyMiss(holder == null ? "missing_getChunk" : "not_ready_getChunk", pos);
         }
         cir.setReturnValue(null);
     }
@@ -89,12 +94,14 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         long pos = ChunkPos.asLong(chunkX, chunkZ);
         if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+            ParallelProcessor.recordAsyncEntityTickAbort("distance_getChunkNow", pos);
             throw new ParallelProcessor.AsyncAbortException();
         }
 
         ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
         if (holder == null) {
             if (ParallelProcessor.isEntityTickExecutionThread()) {
+                ParallelProcessor.recordAsyncEntityTickAbort("missing_getChunkNow", pos);
                 throw new ParallelProcessor.AsyncAbortException();
             }
             cir.setReturnValue(null);
@@ -114,6 +121,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         }
 
         if (ParallelProcessor.isEntityTickExecutionThread()) {
+            ParallelProcessor.recordAsyncEntityTickAbort("not_ready_getChunkNow", pos);
             throw new ParallelProcessor.AsyncAbortException();
         }
         cir.setReturnValue(null);

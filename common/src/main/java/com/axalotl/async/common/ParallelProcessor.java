@@ -28,7 +28,9 @@ import java.util.concurrent.atomic.LongAdder;
 public class ParallelProcessor {
     public static final Logger LOGGER = LogManager.getLogger(ParallelProcessor.class);
     private static final int ASYNC_ABORT_SYNC_COOLDOWN_TICKS = 5;
-    private static final long FALLBACK_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(5);
+    private static final long FALLBACK_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    private static final int MAX_DIAGNOSTIC_SAMPLES = 8;
+    private static final int MAX_TOP_DIAGNOSTIC_ENTRIES = 5;
 
     @Setter
     private static MinecraftServer server;
@@ -47,10 +49,17 @@ public class ParallelProcessor {
     private static final LongAdder asyncEntityTickCooldownCount = new LongAdder();
     private static final LongAdder asyncEntityTickSyncFallbackCount = new LongAdder();
     private static final LongAdder asyncEntityTickSkippedCount = new LongAdder();
+    private static final Map<String, LongAdder> asyncEntityTickAbortReasonCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> asyncEntityTickAbortEntityCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> asyncEntityTickReadyMissReasonCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> asyncEntityTickReadyMissEntityCounts = new ConcurrentHashMap<>();
+    private static final ConcurrentLinkedDeque<String> asyncEntityTickAbortSamples = new ConcurrentLinkedDeque<>();
+    private static final ConcurrentLinkedDeque<String> asyncEntityTickReadyMissSamples = new ConcurrentLinkedDeque<>();
     private static final AtomicLong nextFallbackLogNanos = new AtomicLong(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
     private static final ThreadLocal<Boolean> IS_POOL_THREAD = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Boolean> IS_ENTITY_TICK_CONTEXT = ThreadLocal.withInitial(() -> Boolean.FALSE);
     private static final ThreadLocal<Long> CURRENT_ENTITY_CHUNK_POS = ThreadLocal.withInitial(() -> Long.MIN_VALUE);
+    private static final ThreadLocal<String> CURRENT_ENTITY_TYPE_ID = ThreadLocal.withInitial(() -> "unknown");
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,
@@ -115,6 +124,24 @@ public class ParallelProcessor {
         int requestedChunkX = (int) chunkPosLong;
         int requestedChunkZ = (int) (chunkPosLong >> 32);
         return Math.abs(currentChunkX - requestedChunkX) <= 1 && Math.abs(currentChunkZ - requestedChunkZ) <= 1;
+    }
+
+    public static void recordAsyncEntityTickAbort(String reason, long requestedChunkPosLong) {
+        if (!isEntityTickExecutionThread()) {
+            return;
+        }
+        async$incrementCounter(asyncEntityTickAbortReasonCounts, reason);
+        async$incrementCounter(asyncEntityTickAbortEntityCounts, CURRENT_ENTITY_TYPE_ID.get());
+        async$pushSample(asyncEntityTickAbortSamples, async$formatChunkAccessSample(reason, requestedChunkPosLong));
+    }
+
+    public static void recordAsyncEntityTickReadyMiss(String reason, long requestedChunkPosLong) {
+        if (!isEntityTickExecutionThread()) {
+            return;
+        }
+        async$incrementCounter(asyncEntityTickReadyMissReasonCounts, reason);
+        async$incrementCounter(asyncEntityTickReadyMissEntityCounts, CURRENT_ENTITY_TYPE_ID.get());
+        async$pushSample(asyncEntityTickReadyMissSamples, async$formatChunkAccessSample(reason, requestedChunkPosLong));
     }
 
     public static boolean isShuttingDown() {
@@ -362,10 +389,12 @@ public class ParallelProcessor {
         currentEntities.incrementAndGet();
         IS_ENTITY_TICK_CONTEXT.set(Boolean.TRUE);
         CURRENT_ENTITY_CHUNK_POS.set(entity.chunkPosition().toLong());
+        CURRENT_ENTITY_TYPE_ID.set(EntityType.getKey(entity.getType()).toString());
         try {
             world.tickNonPassenger(entity);
         } finally {
             CURRENT_ENTITY_CHUNK_POS.set(Long.MIN_VALUE);
+            CURRENT_ENTITY_TYPE_ID.set("unknown");
             IS_ENTITY_TICK_CONTEXT.set(Boolean.FALSE);
             currentEntities.decrementAndGet();
         }
@@ -407,18 +436,110 @@ public class ParallelProcessor {
         long syncFallbacks = asyncEntityTickSyncFallbackCount.sumThenReset();
         long skippedTicks = asyncEntityTickSkippedCount.sumThenReset();
         int activeCooldownEntities = pruneExpiredSynchronousCooldowns();
-        if (aborts == 0L && cooldowns == 0L && syncFallbacks == 0L && skippedTicks == 0L && activeCooldownEntities == 0) {
+        String topAbortReasons = async$drainTopCounts(asyncEntityTickAbortReasonCounts);
+        String topAbortEntities = async$drainTopCounts(asyncEntityTickAbortEntityCounts);
+        String topReadyMissReasons = async$drainTopCounts(asyncEntityTickReadyMissReasonCounts);
+        String topReadyMissEntities = async$drainTopCounts(asyncEntityTickReadyMissEntityCounts);
+        String abortSamples = async$drainSamples(asyncEntityTickAbortSamples);
+        String readyMissSamples = async$drainSamples(asyncEntityTickReadyMissSamples);
+        if (aborts == 0L
+                && cooldowns == 0L
+                && syncFallbacks == 0L
+                && skippedTicks == 0L
+                && activeCooldownEntities == 0
+                && topAbortReasons.equals("[]")
+                && topReadyMissReasons.equals("[]")) {
             return;
         }
 
         LOGGER.info(
-                "Async entity tick fallbacks in last 5m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}",
+                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, abortSamples={}, readyMissSamples={}",
                 aborts,
                 cooldowns,
                 skippedTicks,
                 syncFallbacks,
-                activeCooldownEntities
+                activeCooldownEntities,
+                topAbortReasons,
+                topAbortEntities,
+                topReadyMissReasons,
+                topReadyMissEntities,
+                abortSamples,
+                readyMissSamples
         );
+    }
+
+    private static void async$incrementCounter(Map<String, LongAdder> counters, String key) {
+        counters.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+    }
+
+    private static void async$pushSample(ConcurrentLinkedDeque<String> samples, String sample) {
+        samples.addLast(sample);
+        while (samples.size() > MAX_DIAGNOSTIC_SAMPLES) {
+            samples.pollFirst();
+        }
+    }
+
+    private static String async$formatChunkAccessSample(String reason, long requestedChunkPosLong) {
+        long currentChunkPos = CURRENT_ENTITY_CHUNK_POS.get();
+        String entityType = CURRENT_ENTITY_TYPE_ID.get();
+        if (currentChunkPos == Long.MIN_VALUE) {
+            return entityType + " " + reason + " requested=" + async$formatChunkPos(requestedChunkPosLong);
+        }
+
+        int currentChunkX = (int) currentChunkPos;
+        int currentChunkZ = (int) (currentChunkPos >> 32);
+        int requestedChunkX = (int) requestedChunkPosLong;
+        int requestedChunkZ = (int) (requestedChunkPosLong >> 32);
+        return entityType
+                + " "
+                + reason
+                + " current="
+                + async$formatChunkPos(currentChunkPos)
+                + " requested="
+                + async$formatChunkPos(requestedChunkPosLong)
+                + " delta=("
+                + (requestedChunkX - currentChunkX)
+                + ","
+                + (requestedChunkZ - currentChunkZ)
+                + ")";
+    }
+
+    private static String async$formatChunkPos(long chunkPosLong) {
+        return "(" + (int) chunkPosLong + "," + (int) (chunkPosLong >> 32) + ")";
+    }
+
+    private static String async$drainTopCounts(Map<String, LongAdder> counters) {
+        List<Map.Entry<String, Long>> entries = new ArrayList<>();
+        counters.forEach((key, value) -> {
+            long count = value.sumThenReset();
+            if (count > 0L) {
+                entries.add(Map.entry(key, count));
+            }
+        });
+        if (entries.isEmpty()) {
+            return "[]";
+        }
+        entries.sort((left, right) -> Long.compare(right.getValue(), left.getValue()));
+        StringBuilder builder = new StringBuilder("[");
+        int limit = Math.min(MAX_TOP_DIAGNOSTIC_ENTRIES, entries.size());
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) {
+                builder.append(", ");
+            }
+            Map.Entry<String, Long> entry = entries.get(i);
+            builder.append(entry.getKey()).append("=").append(entry.getValue());
+        }
+        builder.append("]");
+        return builder.toString();
+    }
+
+    private static String async$drainSamples(ConcurrentLinkedDeque<String> samples) {
+        List<String> drained = new ArrayList<>();
+        String sample;
+        while ((sample = samples.pollFirst()) != null) {
+            drained.add(sample);
+        }
+        return drained.isEmpty() ? "[]" : drained.toString();
     }
 
     private static boolean isAbortThrowable(Throwable throwable) {
@@ -442,6 +563,12 @@ public class ParallelProcessor {
         asyncEntityTickCooldownCount.reset();
         asyncEntityTickSyncFallbackCount.reset();
         asyncEntityTickSkippedCount.reset();
+        asyncEntityTickAbortReasonCounts.clear();
+        asyncEntityTickAbortEntityCounts.clear();
+        asyncEntityTickReadyMissReasonCounts.clear();
+        asyncEntityTickReadyMissEntityCounts.clear();
+        asyncEntityTickAbortSamples.clear();
+        asyncEntityTickReadyMissSamples.clear();
         nextFallbackLogNanos.set(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
         PortalTeleportationManager.shutdown();
     }
