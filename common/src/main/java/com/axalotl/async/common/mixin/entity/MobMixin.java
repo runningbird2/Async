@@ -1,5 +1,6 @@
 package com.axalotl.async.common.mixin.entity;
 
+import com.axalotl.async.common.spawn.MonsterDespawnReasonTelemetry;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import net.minecraft.server.level.ServerLevel;
@@ -11,7 +12,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 
 @Mixin(Mob.class)
-public class MobMixin {
+public abstract class MobMixin {
 
     @Unique
     private static final Object async$lock = new Object();
@@ -42,5 +43,16 @@ public class MobMixin {
         synchronized (async$lock) {
             original.call(stack);
         }
+    }
+
+    @WrapMethod(method = "checkDespawn")
+    private void async$traceCheckDespawn(Operation<Void> original) {
+        Mob mob = (Mob) (Object) this;
+        MonsterDespawnReasonTelemetry.Probe probe = MonsterDespawnReasonTelemetry.probe(
+                mob,
+                ((LivingEntityAccessor) mob).async$getNoActionTime()
+        );
+        original.call();
+        MonsterDespawnReasonTelemetry.record(probe, mob);
     }
 }
