@@ -1,7 +1,6 @@
 package com.axalotl.async.common;
 
 import com.axalotl.async.common.config.AsyncConfig;
-import com.axalotl.async.common.parallelised.utils.AsyncNavigationTracker;
 import com.axalotl.async.common.parallelised.utils.PortalTeleportationManager;
 import lombok.Setter;
 import net.minecraft.server.MinecraftServer;
@@ -312,7 +311,10 @@ public class ParallelProcessor {
                 entity instanceof Projectile ||
                 entity instanceof AbstractMinecart ||
                 entity instanceof ServerPlayer ||
-                entity instanceof Mob mob && entity.level() instanceof AsyncNavigationTracker navigationTracker && navigationTracker.async$isNavigationActive(mob) ||
+                // Paper/Leaf despawn and mobcap logic assumes a full mob tick cadence on the level thread.
+                // Async mob ticks can abort on chunk access and skip the tick entirely, which leaves
+                // noActionTime stale and causes loaded mobs to stick around and saturate mobcaps.
+                entity instanceof Mob ||
                 BLOCKED_ENTITIES.contains(entity.getClass()) ||
                 blacklistedEntity.contains(entityId) ||
                 AsyncConfig.isEntitySynchronized(EntityType.getKey(entity.getType()));
