@@ -61,10 +61,10 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             cancellable = true
     )
     private void async$getChunk(int x, int z, ChunkStatus leastStatus, boolean create, CallbackInfoReturnable<ChunkAccess> cir) {
-        if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
+        if (Thread.currentThread() == this.mainThread) return;
 
         long pos = ChunkPos.asLong(x, z);
-        if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+        if (ParallelProcessor.isEntityTickExecutionThread() && !ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
             throw new ParallelProcessor.AsyncAbortException();
         }
 
@@ -85,10 +85,10 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
     @Inject(method = "getChunkNow", at = @At("HEAD"), cancellable = true)
     private void async$getChunkNow(int chunkX, int chunkZ, CallbackInfoReturnable<LevelChunk> cir) {
-        if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
+        if (Thread.currentThread() == this.mainThread) return;
 
         long pos = ChunkPos.asLong(chunkX, chunkZ);
-        if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
+        if (ParallelProcessor.isEntityTickExecutionThread() && !ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
             throw new ParallelProcessor.AsyncAbortException();
         }
 
@@ -344,12 +344,21 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                 continue;
             }
 
-            LevelChunk chunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+            LevelChunk chunk = async$extractReadyLevelChunk(holder);
             if (chunk != null) {
                 chunks.put(chunkPosLong, chunk);
             }
         }
         return new AsyncPreparedFullChunkSnapshot(chunks);
+    }
+
+    @Unique
+    private static @Nullable LevelChunk async$extractReadyLevelChunk(ChunkHolder holder) {
+        ChunkAccess ready = async$extractReady(holder, ChunkStatus.FULL);
+        if (ready instanceof LevelChunk levelChunk) {
+            return levelChunk;
+        }
+        return holder.getTickingChunk();
     }
 
     @Unique
