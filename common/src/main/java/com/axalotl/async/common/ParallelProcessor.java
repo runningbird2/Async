@@ -50,6 +50,10 @@ public class ParallelProcessor {
     private static final LongAdder asyncEntityTickCooldownCount = new LongAdder();
     private static final LongAdder asyncEntityTickSyncFallbackCount = new LongAdder();
     private static final LongAdder asyncEntityTickSkippedCount = new LongAdder();
+    private static final LongAdder asyncEntityTickGetChunkCalls = new LongAdder();
+    private static final LongAdder asyncEntityTickGetChunkHits = new LongAdder();
+    private static final LongAdder asyncEntityTickGetChunkNowCalls = new LongAdder();
+    private static final LongAdder asyncEntityTickGetChunkNowHits = new LongAdder();
     private static final Map<String, LongAdder> asyncEntityTickAbortReasonCounts = new ConcurrentHashMap<>();
     private static final Map<String, LongAdder> asyncEntityTickAbortEntityCounts = new ConcurrentHashMap<>();
     private static final Map<String, LongAdder> asyncEntityTickReadyMissReasonCounts = new ConcurrentHashMap<>();
@@ -283,9 +287,9 @@ public class ParallelProcessor {
                 Future<Void> future = (Future<Void>) tickPool.submit(() -> {
                     for (Entity entity : chunk) {
                         if (entity.isRemoved()) continue;
-                        async$recordMonsterDespawnCheck(entity);
+                        recordMonsterDespawnCheck(entity);
                         entity.checkDespawn();
-                        async$recordMonsterDespawnRemoved(entity);
+                        recordMonsterDespawnRemoved(entity);
                     }
                 });
                 futures.add(future);
@@ -390,10 +394,10 @@ public class ParallelProcessor {
         if (entity.isRemoved()) {
             return;
         }
-        async$recordMonsterDespawnCheck(entity);
+        recordMonsterDespawnCheck(entity);
         try {
             entity.checkDespawn();
-            async$recordMonsterDespawnRemoved(entity);
+            recordMonsterDespawnRemoved(entity);
         } catch (Exception e) {
             logDespawnError(entity, e);
         }
@@ -450,6 +454,10 @@ public class ParallelProcessor {
         long cooldowns = asyncEntityTickCooldownCount.sumThenReset();
         long syncFallbacks = asyncEntityTickSyncFallbackCount.sumThenReset();
         long skippedTicks = asyncEntityTickSkippedCount.sumThenReset();
+        long getChunkCalls = asyncEntityTickGetChunkCalls.sumThenReset();
+        long getChunkHits = asyncEntityTickGetChunkHits.sumThenReset();
+        long getChunkNowCalls = asyncEntityTickGetChunkNowCalls.sumThenReset();
+        long getChunkNowHits = asyncEntityTickGetChunkNowHits.sumThenReset();
         long asyncMonsterTicks = asyncMonsterTickCount.sumThenReset();
         long syncMonsterTicks = syncMonsterTickCount.sumThenReset();
         long despawnChecks = monsterDespawnCheckCount.sumThenReset();
@@ -469,6 +477,10 @@ public class ParallelProcessor {
                 && cooldowns == 0L
                 && syncFallbacks == 0L
                 && skippedTicks == 0L
+                && getChunkCalls == 0L
+                && getChunkHits == 0L
+                && getChunkNowCalls == 0L
+                && getChunkNowHits == 0L
                 && asyncMonsterTicks == 0L
                 && syncMonsterTicks == 0L
                 && despawnChecks == 0L
@@ -484,12 +496,16 @@ public class ParallelProcessor {
         }
 
         LOGGER.info(
-                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, abortSamples={}, readyMissSamples={}",
+                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, getChunkCalls={}, getChunkHits={}, getChunkNowCalls={}, getChunkNowHits={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, abortSamples={}, readyMissSamples={}",
                 aborts,
                 cooldowns,
                 skippedTicks,
                 syncFallbacks,
                 activeCooldownEntities,
+                getChunkCalls,
+                getChunkHits,
+                getChunkNowCalls,
+                getChunkNowHits,
                 asyncMonsterTicks,
                 syncMonsterTicks,
                 despawnChecks,
@@ -527,7 +543,7 @@ public class ParallelProcessor {
         async$incrementCounter(syncMonsterTickEntityCounts, EntityType.getKey(entity.getType()).toString());
     }
 
-    private static void async$recordMonsterDespawnCheck(Entity entity) {
+    public static void recordMonsterDespawnCheck(Entity entity) {
         if (!async$isMonster(entity)) {
             return;
         }
@@ -535,12 +551,36 @@ public class ParallelProcessor {
         async$incrementCounter(monsterDespawnCheckEntityCounts, EntityType.getKey(entity.getType()).toString());
     }
 
-    private static void async$recordMonsterDespawnRemoved(Entity entity) {
+    public static void recordMonsterDespawnRemoved(Entity entity) {
         if (!entity.isRemoved() || !async$isMonster(entity)) {
             return;
         }
         monsterDespawnRemovedCount.increment();
         async$incrementCounter(monsterDespawnRemovedEntityCounts, EntityType.getKey(entity.getType()).toString());
+    }
+
+    public static void recordAsyncEntityTickGetChunkCall() {
+        if (isEntityTickExecutionThread()) {
+            asyncEntityTickGetChunkCalls.increment();
+        }
+    }
+
+    public static void recordAsyncEntityTickGetChunkHit() {
+        if (isEntityTickExecutionThread()) {
+            asyncEntityTickGetChunkHits.increment();
+        }
+    }
+
+    public static void recordAsyncEntityTickGetChunkNowCall() {
+        if (isEntityTickExecutionThread()) {
+            asyncEntityTickGetChunkNowCalls.increment();
+        }
+    }
+
+    public static void recordAsyncEntityTickGetChunkNowHit() {
+        if (isEntityTickExecutionThread()) {
+            asyncEntityTickGetChunkNowHits.increment();
+        }
     }
 
     private static boolean async$isMonster(Entity entity) {

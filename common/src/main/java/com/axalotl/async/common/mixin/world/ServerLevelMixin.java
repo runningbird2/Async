@@ -109,7 +109,9 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel, A
 
             // Keep despawn on the level thread; async despawn races lazy-chunk visibility transitions.
             profilerfiller.push("checkDespawn");
+            ParallelProcessor.recordMonsterDespawnCheck(entity);
             entity.checkDespawn();
+            ParallelProcessor.recordMonsterDespawnRemoved(entity);
             profilerfiller.pop();
 
             if (!this.chunkSource.chunkMap.getDistanceManager()

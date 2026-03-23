@@ -69,6 +69,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
 
         long pos = ChunkPos.asLong(x, z);
+        ParallelProcessor.recordAsyncEntityTickGetChunkCall();
         if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
             ParallelProcessor.recordAsyncEntityTickAbort("distance_getChunk", pos);
             throw new ParallelProcessor.AsyncAbortException();
@@ -78,6 +79,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (holder != null) {
             ChunkAccess ready = async$extractReady(holder, leastStatus);
             if (ready != null) {
+                ParallelProcessor.recordAsyncEntityTickGetChunkHit();
                 cir.setReturnValue(ready);
                 return;
             }
@@ -98,6 +100,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (Thread.currentThread() == this.mainThread || !ParallelProcessor.isServerExecutionThread()) return;
 
         long pos = ChunkPos.asLong(chunkX, chunkZ);
+        ParallelProcessor.recordAsyncEntityTickGetChunkNowCall();
         if (!ParallelProcessor.canAccessChunkForAsyncEntityTick(pos)) {
             ParallelProcessor.recordAsyncEntityTickAbort("distance_getChunkNow", pos);
             throw new ParallelProcessor.AsyncAbortException();
@@ -115,12 +118,14 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
         ChunkAccess chunk = holder.getChunkIfPresent(ChunkStatus.FULL);
         if (chunk instanceof LevelChunk lc) {
+            ParallelProcessor.recordAsyncEntityTickGetChunkNowHit();
             cir.setReturnValue(lc);
             return;
         }
 
         LevelChunk tickingChunk = holder.getTickingChunk();
         if (tickingChunk != null) {
+            ParallelProcessor.recordAsyncEntityTickGetChunkNowHit();
             cir.setReturnValue(tickingChunk);
             return;
         }
