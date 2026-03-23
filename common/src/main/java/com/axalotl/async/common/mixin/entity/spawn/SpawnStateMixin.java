@@ -1,5 +1,6 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
+import com.axalotl.async.common.config.AsyncConfig;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
@@ -47,6 +48,11 @@ public class SpawnStateMixin {
 
     @WrapMethod(method = "afterSpawn")
     private void async$afterSpawn(Mob mob, ChunkAccess chunk, Operation<Void> original) {
+        if (!AsyncConfig.enableAsyncSpawn) {
+            original.call(mob, chunk);
+            return;
+        }
+
         EntityType<?> type = mob.getType();
         BlockPos pos = mob.blockPosition();
 
@@ -63,6 +69,10 @@ public class SpawnStateMixin {
 
     @WrapMethod(method = "canSpawnForCategoryGlobal")
     private boolean async$canSpawnForCategoryGlobal(MobCategory mobCategory, Operation<Boolean> original) {
+        if (!AsyncConfig.enableAsyncSpawn) {
+            return original.call(mobCategory);
+        }
+
         int magicNumber = (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1) * (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1);
         int maxMobCount = mobCategory.getMaxInstancesPerChunk() * this.spawnableChunkCount / magicNumber;
         return async$atomicMobCounts.get(mobCategory.ordinal()) < maxMobCount;
@@ -70,6 +80,10 @@ public class SpawnStateMixin {
 
     @WrapMethod(method = "getMobCategoryCounts")
     private Object2IntMap<MobCategory> async$getMobCategoryCounts(Operation<Object2IntMap<MobCategory>> original) {
+        if (!AsyncConfig.enableAsyncSpawn) {
+            return original.call();
+        }
+
         Object2IntOpenHashMap<MobCategory> result = new Object2IntOpenHashMap<>();
         for (MobCategory cat : MobCategory.values()) {
             int count = async$atomicMobCounts.get(cat.ordinal());
