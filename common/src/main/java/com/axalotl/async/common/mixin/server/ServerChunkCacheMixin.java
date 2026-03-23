@@ -36,7 +36,10 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
@@ -58,6 +61,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     @Unique private volatile @Nullable AsyncPreparedSpawnStateTask async$preparedSpawnStateTask;
     @Unique private long async$spawnStateTick;
     @Unique private static final long async$SPAWN_DIAGNOSTICS_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    @Unique private static final int async$MAX_TOP_MONSTER_OWNER_ENTRIES = 6;
     @Unique private static final AtomicLong async$nextSpawnDiagnosticsLogNanos = new AtomicLong(System.nanoTime() + async$SPAWN_DIAGNOSTICS_LOG_INTERVAL_NANOS);
 
     @Inject(
@@ -177,7 +181,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
             async$preparedSpawnStateTask = null;
             NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
-            async$maybeLogSpawnDiagnostics(count, state);
+            async$maybeLogSpawnDiagnostics(count, state, entities);
             return state;
         }
 
@@ -186,13 +190,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
             async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
-            async$maybeLogSpawnDiagnostics(count, preparedState);
+            async$maybeLogSpawnDiagnostics(count, preparedState, entities);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
         async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
-        async$maybeLogSpawnDiagnostics(count, state);
+        async$maybeLogSpawnDiagnostics(count, state, entities);
         return state;
     }
 
@@ -401,7 +405,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     }
 
     @Unique
-    private static void async$maybeLogSpawnDiagnostics(int spawnableChunkCount, NaturalSpawner.SpawnState state) {
+    private void async$maybeLogSpawnDiagnostics(int spawnableChunkCount, NaturalSpawner.SpawnState state, Iterable<Entity> entities) {
         long now = System.nanoTime();
         long nextLogAt = async$nextSpawnDiagnosticsLogNanos.get();
         if (now < nextLogAt) {
@@ -428,11 +432,79 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             summary.append(category.getName()).append("=").append(current).append("/").append(cap);
         }
         summary.append("]");
+        String topMonsterOwners = async$describeTopMonsterOwners(entities);
         ParallelProcessor.LOGGER.info(
-                "Spawn diagnostics in last 1m: asyncSpawnEnabled={}, spawnableChunks={}, categoryCounts={}",
+                "Spawn diagnostics in last 1m: asyncSpawnEnabled={}, spawnableChunks={}, categoryCounts={}, topMonsterOwners={}",
                 AsyncConfig.enableAsyncSpawn,
                 spawnableChunkCount,
-                summary
+                summary,
+                topMonsterOwners
         );
+    }
+
+    @Unique
+    private String async$describeTopMonsterOwners(Iterable<Entity> entities) {
+        List<ServerPlayer> players = new ArrayList<>();
+        for (ServerPlayer player : this.level.players()) {
+            if (!player.isSpectator()) {
+                players.add(player);
+            }
+        }
+        if (players.isEmpty()) {
+            return "[]";
+        }
+
+        Map<ServerPlayer, Integer> monsterCountsByOwner = new HashMap<>();
+        for (Entity entity : entities) {
+            if (entity.isRemoved() || entity.getType().getCategory() != MobCategory.MONSTER) {
+                continue;
+            }
+
+            ServerPlayer owner = async$findNearestPlayer(entity, players);
+            if (owner != null) {
+                monsterCountsByOwner.merge(owner, 1, Integer::sum);
+            }
+        }
+        if (monsterCountsByOwner.isEmpty()) {
+            return "[]";
+        }
+
+        List<Map.Entry<ServerPlayer, Integer>> entries = new ArrayList<>(monsterCountsByOwner.entrySet());
+        entries.sort(Map.Entry.<ServerPlayer, Integer>comparingByValue(Comparator.reverseOrder()));
+
+        StringBuilder builder = new StringBuilder("[");
+        int limit = Math.min(async$MAX_TOP_MONSTER_OWNER_ENTRIES, entries.size());
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) {
+                builder.append(", ");
+            }
+            Map.Entry<ServerPlayer, Integer> entry = entries.get(i);
+            ServerPlayer player = entry.getKey();
+            ChunkPos chunkPos = player.chunkPosition();
+            builder.append(player.getScoreboardName())
+                    .append("=")
+                    .append(entry.getValue())
+                    .append("@(")
+                    .append(chunkPos.x)
+                    .append(",")
+                    .append(chunkPos.z)
+                    .append(")");
+        }
+        builder.append("]");
+        return builder.toString();
+    }
+
+    @Unique
+    private static @Nullable ServerPlayer async$findNearestPlayer(Entity entity, List<ServerPlayer> players) {
+        ServerPlayer nearest = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (ServerPlayer player : players) {
+            double distance = player.distanceToSqr(entity);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                nearest = player;
+            }
+        }
+        return nearest;
     }
 }
