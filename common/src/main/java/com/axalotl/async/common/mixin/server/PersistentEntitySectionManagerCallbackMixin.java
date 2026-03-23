@@ -1,5 +1,6 @@
 package com.axalotl.async.common.mixin.server;
 
+import com.axalotl.async.common.spawn.EntityBookkeepingTelemetry;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
@@ -46,28 +47,37 @@ public abstract class PersistentEntitySectionManagerCallbackMixin {
         this.async$pendingRemoval = true;
 
         if (original.call(section, entity)) {
+            EntityBookkeepingTelemetry.recordSectionRemoveDirect(entity);
             return true;
         }
 
+        EntityBookkeepingTelemetry.recordSectionRemoveFallbackAttempt(entity);
         long actualKey = SectionPos.asLong(entity.blockPosition());
         if (actualKey != this.currentSectionKey) {
             EntitySectionStorage<EntityAccess> storage = (EntitySectionStorage<EntityAccess>) this.async$outerManager.sectionStorage;
             EntitySection<EntityAccess> actualSection = storage.getSection(actualKey);
             if (actualSection != null && actualSection != section) {
                 if (original.call(actualSection, entity)) {
+                    EntityBookkeepingTelemetry.recordSectionRemoveFallbackResolved(entity);
                     this.currentSection = actualSection;
                     this.currentSectionKey = actualKey;
                     return true;
                 }
+                EntityBookkeepingTelemetry.recordSectionRemoveFallbackMiss(entity, "actualSectionRejected");
+                return false;
             }
+            EntityBookkeepingTelemetry.recordSectionRemoveFallbackMiss(entity, actualSection == null ? "actualSectionMissing" : "sameSection");
+            return false;
         }
 
+        EntityBookkeepingTelemetry.recordSectionRemoveFallbackMiss(entity, "sameSectionKey");
         return false;
     }
 
     @WrapMethod(method = "onMove")
     private void async$onMove(Operation<Void> original) {
         if (this.async$pendingRemoval) {
+            EntityBookkeepingTelemetry.recordPendingRemovalMoveSkip(this.entity);
             return;
         }
 

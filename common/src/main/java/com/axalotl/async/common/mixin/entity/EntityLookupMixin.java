@@ -2,6 +2,7 @@ package com.axalotl.async.common.mixin.entity;
 
 import com.axalotl.async.common.parallelised.ConcurrentCollections;
 import com.axalotl.async.common.parallelised.fastutil.Int2ObjectConcurrentHashMap;
+import com.axalotl.async.common.spawn.EntityBookkeepingTelemetry;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -57,6 +58,7 @@ public abstract class EntityLookupMixin<T extends EntityAccess> {
                 byId.put(id, entity);
                 return entity;
             } else {
+                EntityBookkeepingTelemetry.recordLookupDuplicateUuid(entity);
                 LOGGER.warn("Duplicate entity UUID {}: existing={}, new={}", uuid, existing, entity);
                 return existing;
             }
@@ -69,6 +71,22 @@ public abstract class EntityLookupMixin<T extends EntityAccess> {
 
         UUID uuid = entity.getUUID();
         int id = entity.getId();
+        T existingByUuid = byUuid.get(uuid);
+        T existingById = byId.get(id);
+
+        if (existingByUuid == null) {
+            EntityBookkeepingTelemetry.recordLookupRemoveMissingUuid(entity, existingById != null);
+            return;
+        }
+
+        if (existingByUuid.getId() != id) {
+            EntityBookkeepingTelemetry.recordLookupRemoveIdMismatch(entity, existingById != null);
+            return;
+        }
+
+        if (existingById != null && existingById.getUUID() != null && !uuid.equals(existingById.getUUID())) {
+            EntityBookkeepingTelemetry.recordLookupStaleById(entity);
+        }
 
         byUuid.computeIfPresent(uuid, (k, existing) -> {
             if (existing.getId() == id) {

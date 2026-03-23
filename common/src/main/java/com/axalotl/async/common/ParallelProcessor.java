@@ -3,6 +3,7 @@ package com.axalotl.async.common;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.parallelised.utils.AsyncNavigationTracker;
 import com.axalotl.async.common.parallelised.utils.PortalTeleportationManager;
+import com.axalotl.async.common.spawn.EntityBookkeepingTelemetry;
 import com.axalotl.async.common.spawn.MonsterDespawnAreaTelemetry;
 import com.axalotl.async.common.spawn.MonsterDespawnReasonTelemetry;
 import lombok.Setter;
@@ -475,6 +476,7 @@ public class ParallelProcessor {
         String topMonsterDespawnRemoved = async$drainTopCounts(monsterDespawnRemovedEntityCounts);
         String monsterDespawnOwners = MonsterDespawnAreaTelemetry.describeAndReset();
         String monsterDespawnReasons = MonsterDespawnReasonTelemetry.describeAndReset();
+        String entityBookkeeping = EntityBookkeepingTelemetry.describeAndReset();
         String abortSamples = async$drainSamples(asyncEntityTickAbortSamples);
         String readyMissSamples = async$drainSamples(asyncEntityTickReadyMissSamples);
         if (aborts == 0L
@@ -497,12 +499,13 @@ public class ParallelProcessor {
                 && topMonsterDespawnChecks.equals("[]")
                 && topMonsterDespawnRemoved.equals("[]")
                 && monsterDespawnOwners.equals("monsterDespawnOwners=idle")
-                && monsterDespawnReasons.equals("monsterDespawnReasons[idle]")) {
+                && monsterDespawnReasons.equals("monsterDespawnReasons[idle]")
+                && entityBookkeeping.equals("entityBookkeeping=idle")) {
             return;
         }
 
         LOGGER.info(
-                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, getChunkCalls={}, getChunkHits={}, getChunkNowCalls={}, getChunkNowHits={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, monsterDespawnOwners={}, monsterDespawnReasons={}, abortSamples={}, readyMissSamples={}",
+                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, getChunkCalls={}, getChunkHits={}, getChunkNowCalls={}, getChunkNowHits={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, monsterDespawnOwners={}, monsterDespawnReasons={}, entityBookkeeping={}, abortSamples={}, readyMissSamples={}",
                 aborts,
                 cooldowns,
                 skippedTicks,
@@ -526,6 +529,7 @@ public class ParallelProcessor {
                 topMonsterDespawnRemoved,
                 monsterDespawnOwners,
                 monsterDespawnReasons,
+                entityBookkeeping,
                 abortSamples,
                 readyMissSamples
         );

@@ -1,5 +1,6 @@
 package com.axalotl.async.common.mixin.server;
 
+import com.axalotl.async.common.spawn.EntityBookkeepingTelemetry;
 import com.axalotl.async.common.parallelised.fastutil.Long2ObjectConcurrentHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -77,7 +78,9 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
     private static <T extends EntityAccess> Visibility getEffectiveStatus(T entity, Visibility visibility, Operation<Visibility> original) {
         Visibility result = original.call(entity, visibility);
         if (result == null) {
-            return entity.isAlwaysTicking() ? Visibility.TICKING : Visibility.TRACKED;
+            Visibility fallback = entity.isAlwaysTicking() ? Visibility.TICKING : Visibility.TRACKED;
+            EntityBookkeepingTelemetry.recordVisibilityFallback(entity, fallback);
+            return fallback;
         }
         return result;
     }
