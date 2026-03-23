@@ -7,6 +7,7 @@ import com.axalotl.async.common.spawn.AsyncPreparedFullChunkSnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
@@ -40,6 +41,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 @Mixin(value = ServerChunkCache.class, priority = 1500)
@@ -54,6 +57,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
     @Unique private volatile @Nullable AsyncPreparedSpawnStateTask async$preparedSpawnStateTask;
     @Unique private long async$spawnStateTick;
+    @Unique private static final long async$SPAWN_DIAGNOSTICS_LOG_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    @Unique private static final AtomicLong async$nextSpawnDiagnosticsLogNanos = new AtomicLong(System.nanoTime() + async$SPAWN_DIAGNOSTICS_LOG_INTERVAL_NANOS);
 
     @Inject(
             method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
@@ -166,7 +171,9 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         long currentTick = ++this.async$spawnStateTick;
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
             async$preparedSpawnStateTask = null;
-            return original.call(count, entities, chunkGetter, calculator);
+            NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
+            async$maybeLogSpawnDiagnostics(count, state);
+            return state;
         }
 
         List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(entities);
@@ -174,11 +181,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick);
         if (preparedState != null) {
             async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
+            async$maybeLogSpawnDiagnostics(count, preparedState);
             return preparedState;
         }
 
         NaturalSpawner.SpawnState state = original.call(count, entities, chunkGetter, calculator);
         async$schedulePreparedSpawnState(currentTick + 1L, count, entitySnapshot, fullChunkSnapshot);
+        async$maybeLogSpawnDiagnostics(count, state);
         return state;
     }
 
@@ -384,5 +393,41 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             ));
         }
         return entitySnapshot;
+    }
+
+    @Unique
+    private static void async$maybeLogSpawnDiagnostics(int spawnableChunkCount, NaturalSpawner.SpawnState state) {
+        long now = System.nanoTime();
+        long nextLogAt = async$nextSpawnDiagnosticsLogNanos.get();
+        if (now < nextLogAt) {
+            return;
+        }
+        if (!async$nextSpawnDiagnosticsLogNanos.compareAndSet(nextLogAt, now + async$SPAWN_DIAGNOSTICS_LOG_INTERVAL_NANOS)) {
+            return;
+        }
+
+        Object2IntMap<MobCategory> counts = state.getMobCategoryCounts();
+        int magicNumber = (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1) * (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1);
+        StringBuilder summary = new StringBuilder("[");
+        boolean first = true;
+        for (MobCategory category : MobCategory.values()) {
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+            if (!first) {
+                summary.append(", ");
+            }
+            first = false;
+            int current = counts.getInt(category);
+            int cap = category.getMaxInstancesPerChunk() * spawnableChunkCount / magicNumber;
+            summary.append(category.getName()).append("=").append(current).append("/").append(cap);
+        }
+        summary.append("]");
+        ParallelProcessor.LOGGER.info(
+                "Spawn diagnostics in last 1m: asyncSpawnEnabled={}, spawnableChunks={}, categoryCounts={}",
+                AsyncConfig.enableAsyncSpawn,
+                spawnableChunkCount,
+                summary
+        );
     }
 }

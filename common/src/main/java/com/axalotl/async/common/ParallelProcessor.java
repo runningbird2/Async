@@ -10,6 +10,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.entity.monster.Shulker;
 import net.minecraft.world.entity.projectile.Projectile;
@@ -53,6 +54,14 @@ public class ParallelProcessor {
     private static final Map<String, LongAdder> asyncEntityTickAbortEntityCounts = new ConcurrentHashMap<>();
     private static final Map<String, LongAdder> asyncEntityTickReadyMissReasonCounts = new ConcurrentHashMap<>();
     private static final Map<String, LongAdder> asyncEntityTickReadyMissEntityCounts = new ConcurrentHashMap<>();
+    private static final LongAdder asyncMonsterTickCount = new LongAdder();
+    private static final LongAdder syncMonsterTickCount = new LongAdder();
+    private static final LongAdder monsterDespawnCheckCount = new LongAdder();
+    private static final LongAdder monsterDespawnRemovedCount = new LongAdder();
+    private static final Map<String, LongAdder> asyncMonsterTickEntityCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> syncMonsterTickEntityCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> monsterDespawnCheckEntityCounts = new ConcurrentHashMap<>();
+    private static final Map<String, LongAdder> monsterDespawnRemovedEntityCounts = new ConcurrentHashMap<>();
     private static final ConcurrentLinkedDeque<String> asyncEntityTickAbortSamples = new ConcurrentLinkedDeque<>();
     private static final ConcurrentLinkedDeque<String> asyncEntityTickReadyMissSamples = new ConcurrentLinkedDeque<>();
     private static final AtomicLong nextFallbackLogNanos = new AtomicLong(System.nanoTime() + FALLBACK_LOG_INTERVAL_NANOS);
@@ -274,7 +283,9 @@ public class ParallelProcessor {
                 Future<Void> future = (Future<Void>) tickPool.submit(() -> {
                     for (Entity entity : chunk) {
                         if (entity.isRemoved()) continue;
+                        async$recordMonsterDespawnCheck(entity);
                         entity.checkDespawn();
+                        async$recordMonsterDespawnRemoved(entity);
                     }
                 });
                 futures.add(future);
@@ -367,6 +378,7 @@ public class ParallelProcessor {
         if (entity.isRemoved()) {
             return;
         }
+        async$recordMonsterSyncTick(entity);
         try {
             world.tickNonPassenger(entity);
         } catch (Exception e) {
@@ -378,8 +390,10 @@ public class ParallelProcessor {
         if (entity.isRemoved()) {
             return;
         }
+        async$recordMonsterDespawnCheck(entity);
         try {
             entity.checkDespawn();
+            async$recordMonsterDespawnRemoved(entity);
         } catch (Exception e) {
             logDespawnError(entity, e);
         }
@@ -390,6 +404,7 @@ public class ParallelProcessor {
         IS_ENTITY_TICK_CONTEXT.set(Boolean.TRUE);
         CURRENT_ENTITY_CHUNK_POS.set(entity.chunkPosition().toLong());
         CURRENT_ENTITY_TYPE_ID.set(EntityType.getKey(entity.getType()).toString());
+        async$recordMonsterAsyncTick(entity);
         try {
             world.tickNonPassenger(entity);
         } finally {
@@ -435,34 +450,58 @@ public class ParallelProcessor {
         long cooldowns = asyncEntityTickCooldownCount.sumThenReset();
         long syncFallbacks = asyncEntityTickSyncFallbackCount.sumThenReset();
         long skippedTicks = asyncEntityTickSkippedCount.sumThenReset();
+        long asyncMonsterTicks = asyncMonsterTickCount.sumThenReset();
+        long syncMonsterTicks = syncMonsterTickCount.sumThenReset();
+        long despawnChecks = monsterDespawnCheckCount.sumThenReset();
+        long despawnRemoved = monsterDespawnRemovedCount.sumThenReset();
         int activeCooldownEntities = pruneExpiredSynchronousCooldowns();
         String topAbortReasons = async$drainTopCounts(asyncEntityTickAbortReasonCounts);
         String topAbortEntities = async$drainTopCounts(asyncEntityTickAbortEntityCounts);
         String topReadyMissReasons = async$drainTopCounts(asyncEntityTickReadyMissReasonCounts);
         String topReadyMissEntities = async$drainTopCounts(asyncEntityTickReadyMissEntityCounts);
+        String topAsyncMonsterTicks = async$drainTopCounts(asyncMonsterTickEntityCounts);
+        String topSyncMonsterTicks = async$drainTopCounts(syncMonsterTickEntityCounts);
+        String topMonsterDespawnChecks = async$drainTopCounts(monsterDespawnCheckEntityCounts);
+        String topMonsterDespawnRemoved = async$drainTopCounts(monsterDespawnRemovedEntityCounts);
         String abortSamples = async$drainSamples(asyncEntityTickAbortSamples);
         String readyMissSamples = async$drainSamples(asyncEntityTickReadyMissSamples);
         if (aborts == 0L
                 && cooldowns == 0L
                 && syncFallbacks == 0L
                 && skippedTicks == 0L
+                && asyncMonsterTicks == 0L
+                && syncMonsterTicks == 0L
+                && despawnChecks == 0L
+                && despawnRemoved == 0L
                 && activeCooldownEntities == 0
                 && topAbortReasons.equals("[]")
-                && topReadyMissReasons.equals("[]")) {
+                && topReadyMissReasons.equals("[]")
+                && topAsyncMonsterTicks.equals("[]")
+                && topSyncMonsterTicks.equals("[]")
+                && topMonsterDespawnChecks.equals("[]")
+                && topMonsterDespawnRemoved.equals("[]")) {
             return;
         }
 
         LOGGER.info(
-                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, abortSamples={}, readyMissSamples={}",
+                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, abortSamples={}, readyMissSamples={}",
                 aborts,
                 cooldowns,
                 skippedTicks,
                 syncFallbacks,
                 activeCooldownEntities,
+                asyncMonsterTicks,
+                syncMonsterTicks,
+                despawnChecks,
+                despawnRemoved,
                 topAbortReasons,
                 topAbortEntities,
                 topReadyMissReasons,
                 topReadyMissEntities,
+                topAsyncMonsterTicks,
+                topSyncMonsterTicks,
+                topMonsterDespawnChecks,
+                topMonsterDespawnRemoved,
                 abortSamples,
                 readyMissSamples
         );
@@ -470,6 +509,42 @@ public class ParallelProcessor {
 
     private static void async$incrementCounter(Map<String, LongAdder> counters, String key) {
         counters.computeIfAbsent(key, ignored -> new LongAdder()).increment();
+    }
+
+    private static void async$recordMonsterAsyncTick(Entity entity) {
+        if (!async$isMonster(entity)) {
+            return;
+        }
+        asyncMonsterTickCount.increment();
+        async$incrementCounter(asyncMonsterTickEntityCounts, EntityType.getKey(entity.getType()).toString());
+    }
+
+    private static void async$recordMonsterSyncTick(Entity entity) {
+        if (!async$isMonster(entity)) {
+            return;
+        }
+        syncMonsterTickCount.increment();
+        async$incrementCounter(syncMonsterTickEntityCounts, EntityType.getKey(entity.getType()).toString());
+    }
+
+    private static void async$recordMonsterDespawnCheck(Entity entity) {
+        if (!async$isMonster(entity)) {
+            return;
+        }
+        monsterDespawnCheckCount.increment();
+        async$incrementCounter(monsterDespawnCheckEntityCounts, EntityType.getKey(entity.getType()).toString());
+    }
+
+    private static void async$recordMonsterDespawnRemoved(Entity entity) {
+        if (!entity.isRemoved() || !async$isMonster(entity)) {
+            return;
+        }
+        monsterDespawnRemovedCount.increment();
+        async$incrementCounter(monsterDespawnRemovedEntityCounts, EntityType.getKey(entity.getType()).toString());
+    }
+
+    private static boolean async$isMonster(Entity entity) {
+        return entity.getType().getCategory() == MobCategory.MONSTER;
     }
 
     private static void async$pushSample(ConcurrentLinkedDeque<String> samples, String sample) {
