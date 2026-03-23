@@ -170,7 +170,7 @@ public class ParallelProcessor {
                         } catch (AsyncAbortException ignored) {
                             asyncEntityTickAbortCount.increment();
                             markEntityForSynchronousHandling(entity);
-                            syncFallbackEntities.add(entity);
+                            asyncEntityTickSkippedCount.increment();
                         }
                     }
                 });
