@@ -3,6 +3,7 @@ package com.axalotl.async.common;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.parallelised.utils.AsyncNavigationTracker;
 import com.axalotl.async.common.parallelised.utils.PortalTeleportationManager;
+import com.axalotl.async.common.spawn.MonsterDespawnAreaTelemetry;
 import lombok.Setter;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -471,6 +472,7 @@ public class ParallelProcessor {
         String topSyncMonsterTicks = async$drainTopCounts(syncMonsterTickEntityCounts);
         String topMonsterDespawnChecks = async$drainTopCounts(monsterDespawnCheckEntityCounts);
         String topMonsterDespawnRemoved = async$drainTopCounts(monsterDespawnRemovedEntityCounts);
+        String monsterDespawnOwners = MonsterDespawnAreaTelemetry.describeAndReset();
         String abortSamples = async$drainSamples(asyncEntityTickAbortSamples);
         String readyMissSamples = async$drainSamples(asyncEntityTickReadyMissSamples);
         if (aborts == 0L
@@ -491,12 +493,13 @@ public class ParallelProcessor {
                 && topAsyncMonsterTicks.equals("[]")
                 && topSyncMonsterTicks.equals("[]")
                 && topMonsterDespawnChecks.equals("[]")
-                && topMonsterDespawnRemoved.equals("[]")) {
+                && topMonsterDespawnRemoved.equals("[]")
+                && monsterDespawnOwners.equals("monsterDespawnOwners=idle")) {
             return;
         }
 
         LOGGER.info(
-                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, getChunkCalls={}, getChunkHits={}, getChunkNowCalls={}, getChunkNowHits={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, abortSamples={}, readyMissSamples={}",
+                "Async entity tick diagnostics in last 1m: aborts={}, cooldowns={}, skippedTicks={}, syncFallbackTicks={}, activeCooldownEntities={}, getChunkCalls={}, getChunkHits={}, getChunkNowCalls={}, getChunkNowHits={}, asyncMonsterTicks={}, syncMonsterTicks={}, monsterDespawnChecks={}, monsterDespawnRemoved={}, topAbortReasons={}, topAbortEntities={}, topReadyMissReasons={}, topReadyMissEntities={}, topAsyncMonsterTicks={}, topSyncMonsterTicks={}, topMonsterDespawnChecks={}, topMonsterDespawnRemoved={}, monsterDespawnOwners={}, abortSamples={}, readyMissSamples={}",
                 aborts,
                 cooldowns,
                 skippedTicks,
@@ -518,6 +521,7 @@ public class ParallelProcessor {
                 topSyncMonsterTicks,
                 topMonsterDespawnChecks,
                 topMonsterDespawnRemoved,
+                monsterDespawnOwners,
                 abortSamples,
                 readyMissSamples
         );
@@ -549,6 +553,7 @@ public class ParallelProcessor {
         }
         monsterDespawnCheckCount.increment();
         async$incrementCounter(monsterDespawnCheckEntityCounts, EntityType.getKey(entity.getType()).toString());
+        MonsterDespawnAreaTelemetry.recordCheck(entity);
     }
 
     public static void recordMonsterDespawnRemoved(Entity entity) {
@@ -557,6 +562,7 @@ public class ParallelProcessor {
         }
         monsterDespawnRemovedCount.increment();
         async$incrementCounter(monsterDespawnRemovedEntityCounts, EntityType.getKey(entity.getType()).toString());
+        MonsterDespawnAreaTelemetry.recordRemoved(entity);
     }
 
     public static void recordAsyncEntityTickGetChunkCall() {
