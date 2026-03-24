@@ -4,6 +4,7 @@ import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.parallelised.ConcurrentList;
 import com.axalotl.async.common.parallelised.fastutil.Int2ObjectConcurrentHashMap;
+import com.axalotl.async.common.spawn.AsyncChunkMapSpawnInspector;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.mojang.datafixers.DataFixer;
@@ -16,8 +17,12 @@ import net.minecraft.server.level.ChunkGenerationTask;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.GenerationChunkHolder;
+import net.minecraft.core.SectionPos;
+import net.minecraft.server.level.PlayerMap;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
 import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
@@ -33,7 +38,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 @Mixin(value = ChunkMap.class, priority = 1500)
-public abstract class ChunkMapMixin extends SimpleRegionStorage implements ChunkHolder.PlayerProvider {
+public abstract class ChunkMapMixin extends SimpleRegionStorage implements ChunkHolder.PlayerProvider, AsyncChunkMapSpawnInspector {
 
     @Shadow
     @Final
@@ -48,6 +53,10 @@ public abstract class ChunkMapMixin extends SimpleRegionStorage implements Chunk
     @Shadow
     @Final
     private ChunkMap.DistanceManager distanceManager;
+
+    @Shadow
+    @Final
+    private PlayerMap playerMap;
 
     @Shadow
     private volatile Long2ObjectLinkedOpenHashMap<ChunkHolder> visibleChunkMap;
@@ -109,5 +118,34 @@ public abstract class ChunkMapMixin extends SimpleRegionStorage implements Chunk
         } else {
             original.call(action);
         }
+    }
+
+    @Override
+    public List<ServerPlayer> async$getPlayersCloseForSpawningDirect(ChunkPos chunkPos) {
+        return this.async$collectPlayersCloseForSpawning(chunkPos);
+    }
+
+    @Unique
+    private List<ServerPlayer> async$collectPlayersCloseForSpawning(ChunkPos chunkPos) {
+        List<ServerPlayer> players = new ArrayList<>();
+        for (ServerPlayer player : this.playerMap.getAllPlayers()) {
+            if (async$isPlayerCloseEnoughForSpawning(player, chunkPos)) {
+                players.add(player);
+            }
+        }
+        return players;
+    }
+
+    @Unique
+    private static boolean async$isPlayerCloseEnoughForSpawning(ServerPlayer player, ChunkPos chunkPos) {
+        if (player.isSpectator()) {
+            return false;
+        }
+
+        double chunkCenterX = SectionPos.sectionToBlockCoord(chunkPos.x, 8);
+        double chunkCenterZ = SectionPos.sectionToBlockCoord(chunkPos.z, 8);
+        double deltaX = chunkCenterX - player.getX();
+        double deltaZ = chunkCenterZ - player.getZ();
+        return deltaX * deltaX + deltaZ * deltaZ < 16384.0;
     }
 }

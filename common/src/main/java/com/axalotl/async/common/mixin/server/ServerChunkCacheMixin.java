@@ -2,11 +2,13 @@ package com.axalotl.async.common.mixin.server;
 
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
+import com.axalotl.async.common.spawn.AsyncMonsterGlobalCapControl;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import net.minecraft.server.level.*;
 import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
@@ -16,6 +18,9 @@ import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.entity.EntitySection;
+import net.minecraft.world.level.entity.EntitySectionStorage;
+import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.gamerules.GameRules;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
@@ -29,7 +34,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -249,14 +256,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             int count, Iterable<Entity> entities, NaturalSpawner.ChunkGetter chunkGetter,
             LocalMobCapCalculator calculator, Operation<NaturalSpawner.SpawnState> original
     ) {
+        NaturalSpawner.SpawnState state;
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
-            return original.call(count, entities, chunkGetter, calculator);
+            state = original.call(count, entities, chunkGetter, calculator);
+        } else {
+            NaturalSpawner.SpawnState cached = async$latestState;
+            state = cached != null ? cached : original.call(count, entities, chunkGetter, calculator);
         }
-        NaturalSpawner.SpawnState cached = async$latestState;
-        if (cached != null) {
-            return cached;
-        }
-        return original.call(count, entities, chunkGetter, calculator);
+        this.async$applyMonsterCountOffset(state);
+        return state;
     }
 
     @WrapOperation(
@@ -360,5 +368,56 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         if (future.isCompletedExceptionally()) {
             future.join();
         }
+    }
+
+    @Unique
+    private void async$applyMonsterCountOffset(NaturalSpawner.SpawnState state) {
+        if (!(state instanceof AsyncMonsterGlobalCapControl control)) {
+            return;
+        }
+        int atomicMonsterCount = control.async$getAtomicMobCount(MobCategory.MONSTER);
+        int sectionMonsterCount = this.async$countSectionStorageMonsters();
+        control.async$setMonsterCountOffset(sectionMonsterCount - atomicMonsterCount);
+    }
+
+    @Unique
+    @SuppressWarnings("unchecked")
+    private int async$countSectionStorageMonsters() {
+        PersistentEntitySectionManager<Entity> entityManager =
+                ((ServerLevelAccessor) this.level).async$getEntityManager();
+        EntitySectionStorage<Entity> sectionStorage =
+                ((PersistentEntitySectionManagerAccessor<Entity>) entityManager).async$getSectionStorage();
+
+        Set<java.util.UUID> seen = new HashSet<>();
+        int[] count = new int[1];
+
+        sectionStorage.getAllChunksWithExistingSections().forEach(chunkKey ->
+                sectionStorage.getExistingSectionsInChunk(chunkKey).forEach(section -> this.async$countSectionMonsters(section, seen, count))
+        );
+        return count[0];
+    }
+
+    @Unique
+    private void async$countSectionMonsters(EntitySection<Entity> section, Set<java.util.UUID> seen, int[] count) {
+        if (!section.getStatus().isAccessible()) {
+            return;
+        }
+
+        section.getEntities().forEach(entity -> {
+            if (async$isNaturalMonsterCounted(entity) && seen.add(entity.getUUID())) {
+                count[0]++;
+            }
+        });
+    }
+
+    @Unique
+    private static boolean async$isNaturalMonsterCounted(Entity entity) {
+        if (entity.getType().getCategory() != MobCategory.MONSTER) {
+            return false;
+        }
+        if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
+            return false;
+        }
+        return true;
     }
 }

@@ -1,6 +1,5 @@
 package com.axalotl.async.common.mixin.server;
 
-import com.axalotl.async.common.parallelised.fastutil.Long2ByteConcurrentHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ByteMap;
 import net.minecraft.server.level.DistanceManager;
 import org.spongepowered.asm.mixin.Final;
@@ -21,8 +20,6 @@ public class FixedPlayerDistanceChunkTrackerMixin {
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void async$replaceConcurrentChunks(DistanceManager this$0, int maxDistance, CallbackInfo ci) {
-        byte defaultVal = this.chunks.defaultReturnValue();
-        this.chunks = new Long2ByteConcurrentHashMap();
-        this.chunks.defaultReturnValue(defaultVal);
+        // Keep the natural-spawn tracker on vanilla storage.
     }
 }
