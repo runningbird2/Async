@@ -73,8 +73,6 @@ public abstract class ChunkMapMixin extends SimpleRegionStorage implements Chunk
     @Inject(method = "<init>", at = @At("TAIL"))
     private void replaceConVars(CallbackInfo ci) {
         entityMap = new Int2ObjectConcurrentHashMap<>();
-        pendingGenerationTasks = new ConcurrentList<>();
-        chunksToEagerlySave = LongSets.synchronize(new LongLinkedOpenHashSet());
     }
 
     @WrapMethod(method = "addEntity")
