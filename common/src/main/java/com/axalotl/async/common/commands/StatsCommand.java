@@ -196,23 +196,32 @@ public class StatsCommand {
                 .append(Component.literal("\nWorld: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal(target.level().dimension().identifier().toString()).withStyle(ChatFormatting.AQUA))
                 .append(Component.literal("\nChunk: ").withStyle(ChatFormatting.WHITE))
-                .append(Component.literal(chunkPos.x + ", " + chunkPos.z).withStyle(ChatFormatting.GREEN));
+                .append(Component.literal(chunkPos.x + ", " + chunkPos.z).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nSpawnable Chunks: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(mobcapAccess.async$getSpawnableChunkCount())).withStyle(ChatFormatting.GREEN));
 
         for (MobCategory category : MobCategory.values()) {
             if (category == MobCategory.MISC) {
                 continue;
             }
 
-            int limit = category.getMaxInstancesPerChunk();
-            int count = mobcapAccess.async$getLocalMobCount(target, category);
+            int localLimit = category.getMaxInstancesPerChunk();
+            int localCount = mobcapAccess.async$getLocalMobCount(target, category);
             int headroom = mobcapAccess.async$getLocalMobHeadroom(target, category);
+            int globalCount = mobcapAccess.async$getEffectiveMobCount(category);
+            int globalLimit = mobcapAccess.async$getGlobalMobCap(category);
 
             message.append(Component.literal("\n" + async$formatCategoryName(category) + ": ").withStyle(ChatFormatting.YELLOW))
-                    .append(Component.literal(String.valueOf(count)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("local ").withStyle(ChatFormatting.GRAY))
+                    .append(Component.literal(String.valueOf(localCount)).withStyle(ChatFormatting.GREEN))
                     .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
-                    .append(Component.literal(String.valueOf(limit)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal(String.valueOf(localLimit)).withStyle(ChatFormatting.GREEN))
                     .append(Component.literal("  remaining ").withStyle(ChatFormatting.GRAY))
-                    .append(Component.literal(String.valueOf(headroom)).withStyle(headroom > 0 ? ChatFormatting.AQUA : ChatFormatting.RED));
+                    .append(Component.literal(String.valueOf(headroom)).withStyle(headroom > 0 ? ChatFormatting.AQUA : ChatFormatting.RED))
+                    .append(Component.literal("  global ").withStyle(ChatFormatting.GRAY))
+                    .append(Component.literal(String.valueOf(globalCount)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
+                    .append(Component.literal(String.valueOf(globalLimit)).withStyle(ChatFormatting.GREEN));
         }
 
         source.sendSuccess(() -> message, false);
