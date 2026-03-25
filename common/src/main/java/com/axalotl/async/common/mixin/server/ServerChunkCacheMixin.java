@@ -272,7 +272,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
             }
 
             MobCategory category = entity.getType().getCategory();
-            if (category == MobCategory.MISC || !async$countsTowardSpawnCap(entity)) {
+            if (category == MobCategory.MISC) {
                 continue;
             }
 
@@ -686,10 +686,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
             if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
                 continue;
             }
-            if (!async$countsTowardSpawnCap(entity)) {
-                continue;
-            }
-
             EntityType<?> entityType = entity.getType();
             MobCategory category = entityType.getCategory();
             if (category == MobCategory.MISC) {
@@ -702,14 +698,9 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
                     ChunkPos.asLong(blockPos),
                     entityType,
                     category,
-                    async$countsTowardSpawnCap(entity)
+                    true
             ));
         }
         return entitySnapshot;
-    }
-
-    @Unique
-    private static boolean async$countsTowardSpawnCap(Entity entity) {
-        return entity instanceof Mob mob && ((AsyncMobcapTrackedMob) mob).async$countsTowardSpawnCap();
     }
 }

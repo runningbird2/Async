@@ -31,10 +31,6 @@ public final class AsyncPreparedSpawnStateBuilder {
 
         for (AsyncPreparedSpawnEntitySnapshot entity : entities) {
             async$abortIfCancelled();
-            if (!entity.countsTowardSpawnCap()) {
-                continue;
-            }
-
             BlockPos blockPos = entity.blockPos();
             LevelChunk chunk = level.getChunkSource().getChunkNow(blockPos.getX() >> 4, blockPos.getZ() >> 4);
             if (chunk == null) {
