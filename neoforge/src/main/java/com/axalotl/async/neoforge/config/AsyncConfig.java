@@ -15,6 +15,8 @@ public class AsyncConfig {
 
     private static final ModConfigSpec.BooleanValue disabled;
     private static final ModConfigSpec.IntValue maxThreads;
+    private static final ModConfigSpec.IntValue maxSpawnThreads;
+    private static final ModConfigSpec.IntValue maxConsecutiveAsyncSpawnFailures;
     private static final ModConfigSpec.ConfigValue<List<? extends String>> synchronizedEntities;
     private static final ModConfigSpec.BooleanValue enableAsyncSpawn;
     private static final ModConfigSpec.BooleanValue enableAsyncRandomTicks;
@@ -27,6 +29,12 @@ public class AsyncConfig {
 
         maxThreads = BUILDER.comment("Maximum worker threads. -1 = auto.")
                 .defineInRange("maxThreads", com.axalotl.async.common.config.AsyncConfig.maxThreads, -1, Integer.MAX_VALUE);
+
+        maxSpawnThreads = BUILDER.comment("Maximum async spawn worker threads. -1 = auto (min(maxThreads, 3)).")
+                .defineInRange("maxSpawnThreads", com.axalotl.async.common.config.AsyncConfig.maxSpawnThreads, -1, Integer.MAX_VALUE);
+
+        maxConsecutiveAsyncSpawnFailures = BUILDER.comment("Disable async entity spawning after this many consecutive async spawn failures. 0 = never auto-disable.")
+                .defineInRange("maxConsecutiveAsyncSpawnFailures", com.axalotl.async.common.config.AsyncConfig.maxConsecutiveAsyncSpawnFailures, 0, Integer.MAX_VALUE);
 
         synchronizedEntities = BUILDER.comment("""
                         List of entity IDs or namespaces (*):
@@ -53,6 +61,8 @@ public class AsyncConfig {
     public static void loadConfig() {
         com.axalotl.async.common.config.AsyncConfig.disabled = disabled.get();
         com.axalotl.async.common.config.AsyncConfig.maxThreads = maxThreads.get();
+        com.axalotl.async.common.config.AsyncConfig.maxSpawnThreads = maxSpawnThreads.get();
+        com.axalotl.async.common.config.AsyncConfig.maxConsecutiveAsyncSpawnFailures = maxConsecutiveAsyncSpawnFailures.get();
         com.axalotl.async.common.config.AsyncConfig.enableAsyncSpawn = enableAsyncSpawn.get();
         com.axalotl.async.common.config.AsyncConfig.enableAsyncRandomTicks = enableAsyncRandomTicks.get();
 
@@ -70,6 +80,8 @@ public class AsyncConfig {
     public static void saveConfig() {
         disabled.set(com.axalotl.async.common.config.AsyncConfig.disabled);
         maxThreads.set(com.axalotl.async.common.config.AsyncConfig.maxThreads);
+        maxSpawnThreads.set(com.axalotl.async.common.config.AsyncConfig.maxSpawnThreads);
+        maxConsecutiveAsyncSpawnFailures.set(com.axalotl.async.common.config.AsyncConfig.maxConsecutiveAsyncSpawnFailures);
         enableAsyncSpawn.set(com.axalotl.async.common.config.AsyncConfig.enableAsyncSpawn);
         enableAsyncRandomTicks.set(com.axalotl.async.common.config.AsyncConfig.enableAsyncRandomTicks);
         synchronizedEntities.set(new ArrayList<>(com.axalotl.async.common.config.AsyncConfig.synchronizedEntities));

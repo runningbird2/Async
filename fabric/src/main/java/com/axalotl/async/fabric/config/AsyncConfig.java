@@ -26,6 +26,8 @@ public class AsyncConfig {
     private static final Set<String> VALID_KEYS = Set.of(
             "disabled",
             "maxThreads",
+            "maxSpawnThreads",
+            "maxConsecutiveAsyncSpawnFailures",
             "synchronizedEntities",
             "enableAsyncSpawn",
             "enableAsyncRandomTicks"
@@ -56,6 +58,8 @@ public class AsyncConfig {
     public static void saveConfig() {
         setWithComment("disabled", disabled, "Enables parallel processing of entities.");
         setWithComment("maxThreads", maxThreads, "Maximum worker threads. -1 = auto.");
+        setWithComment("maxSpawnThreads", maxSpawnThreads, "Maximum async spawn worker threads. -1 = auto (min(maxThreads, 3)).");
+        setWithComment("maxConsecutiveAsyncSpawnFailures", maxConsecutiveAsyncSpawnFailures, "Disable async entity spawning after this many consecutive async spawn failures. 0 = never auto-disable.");
         setWithComment("synchronizedEntities", new ArrayList<>(synchronizedEntities),
                 """
                         List of entity IDs or namespaces (*):
@@ -80,6 +84,8 @@ public class AsyncConfig {
 
         disabled = CONFIG.getOrElse("disabled", disabled);
         maxThreads = CONFIG.getOrElse("maxThreads", maxThreads);
+        maxSpawnThreads = CONFIG.getOrElse("maxSpawnThreads", maxSpawnThreads);
+        maxConsecutiveAsyncSpawnFailures = CONFIG.getOrElse("maxConsecutiveAsyncSpawnFailures", maxConsecutiveAsyncSpawnFailures);
         enableAsyncSpawn = CONFIG.getOrElse("enableAsyncSpawn", enableAsyncSpawn);
         enableAsyncRandomTicks = CONFIG.getOrElse("enableAsyncRandomTicks", enableAsyncRandomTicks);
 
@@ -95,6 +101,8 @@ public class AsyncConfig {
     private static void restoreComments() {
         setCommentIfExists("disabled", "Enables parallel processing of entities.");
         setCommentIfExists("maxThreads", "Maximum worker threads. -1 = auto.");
+        setCommentIfExists("maxSpawnThreads", "Maximum async spawn worker threads. -1 = auto (min(maxThreads, 3)).");
+        setCommentIfExists("maxConsecutiveAsyncSpawnFailures", "Disable async entity spawning after this many consecutive async spawn failures. 0 = never auto-disable.");
         setCommentIfExists("synchronizedEntities", """
                 List of entity IDs or namespaces (*):
                   - 'minecraft:zombie' = specific entity
@@ -128,6 +136,8 @@ public class AsyncConfig {
     private static void setDefaultValues() {
         disabled = false;
         maxThreads = -1;
+        maxSpawnThreads = -1;
+        maxConsecutiveAsyncSpawnFailures = 5;
         enableAsyncSpawn = true;
         enableAsyncRandomTicks = false;
         synchronizedEntities = getDefaultSynchronizedEntities();

@@ -63,10 +63,18 @@ public final class PortalTeleportationManager {
 
         CompletableFuture<Void> result = new CompletableFuture<>();
 
-        executor.execute(() -> {
-            processRequestOnExecutor(entity, portal, entryPos, sourceLevel);
-            result.complete(null);
-        });
+        try {
+            executor.execute(() -> {
+                try {
+                    processRequestOnExecutor(entity, portal, entryPos, sourceLevel);
+                    result.complete(null);
+                } catch (Throwable throwable) {
+                    result.completeExceptionally(throwable);
+                }
+            });
+        } catch (Throwable throwable) {
+            result.completeExceptionally(throwable);
+        }
 
         result.join();
     }

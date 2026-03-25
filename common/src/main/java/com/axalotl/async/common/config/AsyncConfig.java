@@ -15,7 +15,9 @@ public class AsyncConfig {
 
     public static boolean disabled = false;
     public static int maxThreads = -1;
-    public static boolean enableAsyncSpawn = true;
+    public static int maxSpawnThreads = -1;
+    public static int maxConsecutiveAsyncSpawnFailures = 5;
+    public static volatile boolean enableAsyncSpawn = true;
     public static boolean enableAsyncRandomTicks = false;
     public static Set<String> synchronizedEntities = getDefaultSynchronizedEntities();
 
@@ -37,6 +39,13 @@ public class AsyncConfig {
     public static int getParallelism() {
         if (maxThreads <= 0) return Runtime.getRuntime().availableProcessors();
         return Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), maxThreads));
+    }
+
+    public static int getSpawnParallelism(int entityParallelism) {
+        if (maxSpawnThreads <= 0) {
+            return Math.max(1, Math.min(entityParallelism, 3));
+        }
+        return Math.max(1, Math.min(Runtime.getRuntime().availableProcessors(), maxSpawnThreads));
     }
 
     public static boolean isNamespaceWildcard(String input) {

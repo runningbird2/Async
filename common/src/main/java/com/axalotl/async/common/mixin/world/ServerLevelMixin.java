@@ -99,6 +99,7 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
     @Redirect(method = "tick", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/entity/EntityTickList;forEach(Ljava/util/function/Consumer;)V"))
     private void overwriteEntityTicking(EntityTickList entityTickList, Consumer<Entity> consumer) {
         ProfilerFiller profilerfiller = Profiler.get();
+        ParallelProcessor.flushAsyncAbortFallbackSummariesIfDue();
 
         List<Entity> toTick = new ArrayList<>();
 
@@ -109,6 +110,8 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
             profilerfiller.push("checkDespawn");
             entity.checkDespawn();
             profilerfiller.pop();
+
+            if (entity.isRemoved()) return;
 
             if (!this.chunkSource.chunkMap.getDistanceManager()
                     .inEntityTickingRange(entity.chunkPosition().toLong())) return;

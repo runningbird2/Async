@@ -1,14 +1,19 @@
 package com.axalotl.async.common.mixin.server;
 
+import com.axalotl.async.common.AsyncSpawnCacheMissException;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
-import com.axalotl.async.common.spawn.AsyncMonsterGlobalCapControl;
+import com.axalotl.async.common.platform.PlatformUtils;
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
-import net.minecraft.server.level.*;
+import net.minecraft.server.level.ChunkHolder;
+import net.minecraft.server.level.ChunkMap;
+import net.minecraft.server.level.ChunkResult;
+import net.minecraft.server.level.DistanceManager;
+import net.minecraft.server.level.ServerChunkCache;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Util;
 import net.minecraft.util.profiling.ProfilerFiller;
-import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
@@ -18,9 +23,6 @@ import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
-import net.minecraft.world.level.entity.EntitySection;
-import net.minecraft.world.level.entity.EntitySectionStorage;
-import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.gamerules.GameRules;
 import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
@@ -34,390 +36,514 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
 @Mixin(value = ServerChunkCache.class, priority = 1500)
 public abstract class ServerChunkCacheMixin extends ChunkSource {
+    @Shadow
+    @Final
+    public ChunkMap chunkMap;
 
-    @Shadow @Final public ChunkMap chunkMap;
-    @Shadow @Final Thread mainThread;
-    @Shadow @Final public ServerChunkCache.MainThreadExecutor mainThreadProcessor;
-    @Shadow @Final private DistanceManager distanceManager;
-    @Shadow @Final private ServerLevel level;
-    @Shadow private volatile NaturalSpawner.@Nullable SpawnState lastSpawnState;
-    @Shadow private boolean spawnEnemies;
+    @Shadow
+    @Final
+    Thread mainThread;
 
-    @Shadow public abstract @Nullable ChunkHolder getVisibleChunkIfPresent(long pos);
-    @Shadow protected abstract CompletableFuture<ChunkResult<ChunkAccess>> getChunkFutureMainThread(int x, int z, ChunkStatus leastStatus, boolean create);
-    @Shadow protected abstract void getFullChunk(long chunkPos, Consumer<LevelChunk> fullChunkGetter);
-    @Shadow public abstract void tickSpawningChunk(LevelChunk chunk, long timeInhabited, List<MobCategory> spawnCategories, NaturalSpawner.SpawnState spawnState);
+    @Shadow
+    @Final
+    public ServerChunkCache.MainThreadExecutor mainThreadProcessor;
 
-    @Unique private boolean async$firstRunSpawnCounts = true;
-    @Unique private final AtomicBoolean async$spawnCountsReady = new AtomicBoolean(false);
-    @Unique private volatile NaturalSpawner.@Nullable SpawnState async$latestState;
-    @Unique private long async$timeInhabited;
-    @Unique private volatile CompletableFuture<Void> async$spawnFuture;
+    @Shadow
+    public abstract @Nullable ChunkHolder getVisibleChunkIfPresent(long pos);
 
-    @Unique private static final long INITIAL_PARK_NS = 50_000L;
-    @Unique private static final long MAX_PARK_NS = 1_000_000L;
+    @Shadow
+    protected abstract CompletableFuture<ChunkResult<ChunkAccess>> getChunkFutureMainThread(int x, int z, ChunkStatus leastStatus, boolean create);
 
+    @Shadow
+    private final Set<ChunkHolder> chunkHoldersToBroadcast = ConcurrentHashMap.newKeySet();
 
-    @Inject(
-            method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
-            at = @At("HEAD"),
-            cancellable = true
-    )
+    @Shadow
+    @Final
+    private DistanceManager distanceManager;
+
+    @Shadow
+    private volatile NaturalSpawner.@Nullable SpawnState lastSpawnState;
+
+    @Shadow
+    @Final
+    private ServerLevel level;
+
+    @Shadow
+    protected abstract void getFullChunk(long chunkPos, Consumer<LevelChunk> fullChunkGetter);
+
+    @Shadow
+    private final List<LevelChunk> spawningChunks = Collections.synchronizedList(new ArrayList<>());
+
+    @Shadow
+    private boolean spawnEnemies;
+
+    @Unique
+    private boolean async$firstRunSpawnCounts = true;
+
+    @Unique
+    private final AtomicBoolean async$spawnCountsReady = new AtomicBoolean(false);
+
+    @Unique
+    private final AtomicBoolean async$forceSyncSpawnNextTick = new AtomicBoolean(false);
+
+    @Unique
+    private static final AsyncSpawnCacheMissException async$SPAWN_CACHE_MISS = new AsyncSpawnCacheMissException();
+
+    @Unique
+    private static final long async$SPAWN_FALLBACK_SUMMARY_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(5);
+
+    @Unique
+    private final AtomicInteger async$consecutiveSpawnStateFailures = new AtomicInteger(0);
+
+    @Unique
+    private final AtomicInteger async$consecutiveSpawnChunkFailures = new AtomicInteger(0);
+
+    @Unique
+    private final AtomicInteger async$spawnStateGeneration = new AtomicInteger(0);
+
+    @Unique
+    private final Object async$spawnStateLock = new Object();
+
+    @Unique
+    private long async$spawnFallbackSummaryWindowStartNanos;
+
+    @Unique
+    private int async$spawnStateFallbackSummaryCount;
+
+    @Unique
+    private int async$spawnChunkFallbackSummaryCount;
+
+    @Shadow
+    public abstract void tickSpawningChunk(LevelChunk chunk, long timeInhabited, List<MobCategory> spawnCategories, NaturalSpawner.SpawnState spawnState);
+
+    @Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;", at = @At("HEAD"), cancellable = true)
     private void async$getChunk(int x, int z, ChunkStatus leastStatus, boolean create, CallbackInfoReturnable<ChunkAccess> cir) {
         if (Thread.currentThread() == this.mainThread) return;
 
-        long pos = ChunkPos.asLong(x, z);
-        ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
-
-        if (holder != null) {
-            ChunkAccess ready = async$extractReady(holder, leastStatus);
-            if (ready != null) {
-                cir.setReturnValue(ready);
-                return;
-            }
-
-            CompletableFuture<?> existingFuture = async$findPendingFuture(holder, leastStatus);
-            if (existingFuture != null) {
-                cir.setReturnValue(async$awaitWithProbing(existingFuture, pos, leastStatus));
-                return;
-            }
-        }
-
-        if (!create) {
-            cir.setReturnValue(null);
+        ChunkAccess access = async$tryGetChunk(x, z, leastStatus);
+        if (access != null) {
+            cir.setReturnValue(access);
             return;
         }
-        CompletableFuture<?> ticketTask = CompletableFuture.runAsync(() -> this.getChunkFutureMainThread(x, z, leastStatus, true), this.mainThreadProcessor);
-        cir.setReturnValue(async$awaitAfterTicket(ticketTask, pos, leastStatus));
+
+        if (ParallelProcessor.isSpawnExecutionThread()) {
+            if (!create) {
+                cir.setReturnValue(null);
+                return;
+            }
+            throw async$SPAWN_CACHE_MISS;
+        }
+
+        if (ParallelProcessor.isTickExecutionThread()) {
+            throw new ParallelProcessor.AsyncAbortException();
+        }
+
+        CompletableFuture<ChunkResult<ChunkAccess>> future = CompletableFuture.supplyAsync(
+                () -> this.getChunkFutureMainThread(x, z, leastStatus, create),
+                this.mainThreadProcessor
+        ).thenCompose(f -> f);
+
+        while (!future.isDone()) {
+            if (async$shouldAbortChunkWait()) {
+                future.cancel(false);
+                throw new ParallelProcessor.AsyncAbortException();
+            }
+
+            ChunkAccess cached = async$tryGetChunk(x, z, leastStatus);
+            if (cached != null) {
+                future.cancel(false);
+                cir.setReturnValue(cached);
+                return;
+            }
+            LockSupport.parkNanos(10_000);
+        }
+
+        ChunkAccess chunk = future.join().orElse(null);
+        if (chunk instanceof ImposterProtoChunk imposter) {
+            chunk = imposter.getWrapped();
+        }
+        cir.setReturnValue(chunk);
+    }
+
+    @Unique
+    private @Nullable ChunkAccess async$tryGetChunk(int x, int z, ChunkStatus leastStatus) {
+        ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(x, z));
+        if (holder == null) return null;
+
+        ChunkAccess chunk = holder.getChunkIfPresent(leastStatus);
+        if (chunk != null) {
+            if (chunk instanceof ImposterProtoChunk imposter) {
+                return imposter.getWrapped();
+            }
+            return chunk;
+        }
+
+        return null;
     }
 
     @Inject(method = "getChunkNow", at = @At("HEAD"), cancellable = true)
-    private void async$getChunkNow(int chunkX, int chunkZ, CallbackInfoReturnable<LevelChunk> cir) {
-        if (Thread.currentThread() == this.mainThread) return;
-
-        ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(chunkX, chunkZ));
-        if (holder == null) {
-            cir.setReturnValue(null);
-            return;
-        }
-
-        ChunkAccess chunk = holder.getChunkIfPresent(ChunkStatus.FULL);
-        if (chunk instanceof LevelChunk lc) {
-            cir.setReturnValue(lc);
-            return;
-        }
-
-        cir.setReturnValue(holder.getTickingChunk());
-    }
-
-    @Unique
-    private @Nullable ChunkAccess async$awaitAfterTicket(
-            CompletableFuture<?> ticketTask, long pos, ChunkStatus status
-    ) {
-        long sleepNs = INITIAL_PARK_NS;
-        for (;;) {
-            if (ticketTask.isCompletedExceptionally()) {
-                ticketTask.join();
-            }
-
-            ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
+    private void shortcutGetChunkNow(int chunkX, int chunkZ, CallbackInfoReturnable<LevelChunk> cir) {
+        if (Thread.currentThread() != this.mainThread) {
+            ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(chunkX, chunkZ));
             if (holder != null) {
-                ChunkAccess ready = async$extractReady(holder, status);
-                if (ready != null) return ready;
-
-                CompletableFuture<?> directFuture = async$findPendingFuture(holder, status);
-                if (directFuture != null) {
-                    return async$awaitWithProbing(directFuture, pos, status);
+                if (ParallelProcessor.isSpawnExecutionThread()) {
+                    LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+                    cir.setReturnValue(levelChunk);
+                    return;
                 }
-                ChunkAccess fromHolder = async$extractCompleted(holder, status);
-                if (fromHolder != null) return fromHolder;
-            }
 
-            LockSupport.parkNanos(sleepNs);
-            sleepNs = Math.min(sleepNs << 1, MAX_PARK_NS);
-        }
-    }
+                if (ParallelProcessor.isTickExecutionThread()) {
+                    LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+                    if (levelChunk != null) {
+                        cir.setReturnValue(levelChunk);
+                        return;
+                    }
+                    throw new ParallelProcessor.AsyncAbortException();
+                }
 
-    @Unique
-    private static @Nullable CompletableFuture<?> async$findPendingFuture(ChunkHolder holder, ChunkStatus status) {
-        AtomicReferenceArray<?> futures = holder.futures;
-        CompletableFuture<?> genFuture = (CompletableFuture<?>) futures.get(status.getIndex());
-        if (genFuture != null && !genFuture.isDone()) {
-            return genFuture;
-        }
-        if (status == ChunkStatus.FULL) {
-            CompletableFuture<?> fullFuture = holder.getFullChunkFuture();
-            if (!fullFuture.isDone()) {
-                return fullFuture;
+                CompletableFuture<ChunkResult<ChunkAccess>> future = holder.scheduleChunkGenerationTask(ChunkStatus.FULL, this.chunkMap);
+                ChunkAccess chunk = future.getNow(ChunkHolder.UNLOADED_CHUNK).orElse(null);
+                if (chunk instanceof LevelChunk worldChunk) {
+                    cir.setReturnValue(worldChunk);
+                }
             }
         }
-        return null;
     }
 
     @Unique
-    private @Nullable ChunkAccess async$awaitWithProbing(CompletableFuture<?> future, long pos, ChunkStatus status) {
-        long sleepNs = INITIAL_PARK_NS;
-        while (!future.isDone()) {
-            ChunkHolder holder = this.getVisibleChunkIfPresent(pos);
-            if (holder != null) {
-                ChunkAccess ready = async$extractReady(holder, status);
-                if (ready != null) return ready;
+    private void async$getLoadedFullChunkOrThrow(long chunkPos, Consumer<LevelChunk> fullChunkGetter) {
+        ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPos);
+        if (holder == null) {
+            throw async$SPAWN_CACHE_MISS;
+        }
+
+        LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+        if (levelChunk == null) {
+            throw async$SPAWN_CACHE_MISS;
+        }
+        fullChunkGetter.accept(levelChunk);
+    }
+
+    @Unique
+    private NaturalSpawner.SpawnState async$createSpawnState(int naturalSpawnChunkCount) {
+        NaturalSpawner.ChunkGetter chunkGetter = ParallelProcessor.isSpawnExecutionThread()
+                ? this::async$getLoadedFullChunkOrThrow
+                : this::getFullChunk;
+        return NaturalSpawner.createState(
+                naturalSpawnChunkCount,
+                this.level.getAllEntities(),
+                chunkGetter,
+                new LocalMobCapCalculator(this.chunkMap)
+        );
+    }
+
+    @Unique
+    private void async$publishSpawnStateSync(int naturalSpawnChunkCount) {
+        synchronized (this.async$spawnStateLock) {
+            this.async$spawnStateGeneration.incrementAndGet();
+            this.lastSpawnState = async$createSpawnState(naturalSpawnChunkCount);
+        }
+    }
+
+    @Unique
+    private int async$nextSpawnStateGeneration() {
+        synchronized (this.async$spawnStateLock) {
+            return this.async$spawnStateGeneration.incrementAndGet();
+        }
+    }
+
+    @Unique
+    private boolean async$tryPublishSpawnStateAsync(int generation, NaturalSpawner.SpawnState spawnState) {
+        synchronized (this.async$spawnStateLock) {
+            if (!AsyncConfig.enableAsyncSpawn || ParallelProcessor.isShuttingDown()) {
+                return false;
             }
-            LockSupport.parkNanos(sleepNs);
-            sleepNs = Math.min(sleepNs << 1, MAX_PARK_NS);
-        }
-        return async$extractFromFuture(future);
-    }
-
-    @Unique
-    private static @Nullable ChunkAccess async$extractReady(ChunkHolder holder, ChunkStatus status) {
-        ChunkAccess chunk = holder.getChunkIfPresent(status);
-        if (chunk != null) return async$unwrap(chunk);
-
-        chunk = holder.getChunkIfPresentUnchecked(status);
-        if (chunk != null) return async$unwrap(chunk);
-        if (status == ChunkStatus.FULL) {
-            LevelChunk ticking = holder.getTickingChunk();
-            if (ticking != null) return ticking;
-        }
-        return null;
-    }
-
-    @Unique
-    private static @Nullable ChunkAccess async$extractCompleted(ChunkHolder holder, ChunkStatus status) {
-        AtomicReferenceArray<?> futures = holder.futures;
-        CompletableFuture<?> future = (CompletableFuture<?>) futures.get(status.getIndex());
-        if (future != null && future.isDone()) {
-            return async$extractFromFuture(future);
-        }
-        if (status == ChunkStatus.FULL) {
-            CompletableFuture<?> fullFuture = holder.getFullChunkFuture();
-            if (fullFuture.isDone()) {
-                return async$extractFromFuture(fullFuture);
+            if (this.async$spawnStateGeneration.get() != generation) {
+                return false;
             }
-        }
-        return null;
-    }
 
-    @Unique
-    private static @Nullable ChunkAccess async$extractFromFuture(CompletableFuture<?> future) {
-        Object raw = future.join();
-        if (raw instanceof ChunkResult<?> result) {
-            Object chunk = result.orElse(null);
-            if (chunk instanceof ChunkAccess ca) return async$unwrap(ca);
+            this.lastSpawnState = spawnState;
+            return true;
         }
-        return null;
-    }
-
-    @Unique
-    private static ChunkAccess async$unwrap(ChunkAccess chunk) {
-        if (chunk instanceof ImposterProtoChunk imposter) {
-            return imposter.getWrapped();
-        }
-        return chunk;
     }
 
     @Inject(method = "tickChunks()V", at = @At("TAIL"))
-    private void async$scheduleSpawnStatePrecompute(CallbackInfo ci) {
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) return;
-
-        if (async$firstRunSpawnCounts) {
-            async$firstRunSpawnCounts = false;
-            async$spawnCountsReady.set(true);
-        }
-        if (async$spawnCountsReady.getAndSet(false)) {
-            final int i = distanceManager.getNaturalSpawnChunkCount();
-            ParallelProcessor.tickPool.submit(() -> {
-                async$latestState = NaturalSpawner.createState(i, this.level.getAllEntities(),
-                        this::getFullChunk, new LocalMobCapCalculator(this.chunkMap));
-                async$spawnCountsReady.set(true);
-            });
-        }
-    }
-
-    @Inject(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V", at = @At("HEAD"))
-    private void async$captureTimeInhabited(ProfilerFiller profiler, long timeInhabited, CallbackInfo ci) {
-        async$timeInhabited = timeInhabited;
-    }
-
-    @WrapOperation(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/NaturalSpawner;createState(ILjava/lang/Iterable;Lnet/minecraft/world/level/NaturalSpawner$ChunkGetter;Lnet/minecraft/world/level/LocalMobCapCalculator;)Lnet/minecraft/world/level/NaturalSpawner$SpawnState;"))
-    private NaturalSpawner.SpawnState async$wrapCreateState(
-            int count, Iterable<Entity> entities, NaturalSpawner.ChunkGetter chunkGetter,
-            LocalMobCapCalculator calculator, Operation<NaturalSpawner.SpawnState> original
-    ) {
-        NaturalSpawner.SpawnState state;
+    private void tickChunks(CallbackInfo ci) {
+        async$flushSpawnFallbackSummaryIfDue();
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
-            state = original.call(count, entities, chunkGetter, calculator);
-        } else {
-            NaturalSpawner.SpawnState cached = async$latestState;
-            state = cached != null ? cached : original.call(count, entities, chunkGetter, calculator);
-        }
-        this.async$applyMonsterCountOffset(state);
-        return state;
-    }
-
-    @WrapOperation(
-            method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V",
-            at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkMap;collectSpawningChunks(Ljava/util/List;)V")
-    )
-    private void async$wrapCollectSpawning(ChunkMap instance, List<LevelChunk> list, Operation<Void> original) {
-        original.call(instance, list);
-
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) return;
-
-        List<LevelChunk> chunks = new ArrayList<>(list);
-        list.clear();
-
-        NaturalSpawner.SpawnState state = this.lastSpawnState;
-        if (state == null || chunks.isEmpty()) {
-            async$spawnFuture = null;
             return;
         }
 
-        long time = async$timeInhabited;
-        boolean enemies = this.spawnEnemies;
-        long gameTime = this.level.getGameTime();
-
-        async$spawnFuture = CompletableFuture.runAsync(() -> {
-            Collections.shuffle(chunks);
-            boolean doMobSpawning = this.level.getGameRules().get(GameRules.SPAWN_MOBS);
-            List<MobCategory> categories;
-            if (doMobSpawning) {
-                boolean spawnPersistent = gameTime % 400L == 0L;
-                categories = NaturalSpawner.getFilteredSpawningCategories(state, true, enemies, spawnPersistent);
-            } else {
-                categories = List.of();
-            }
-            for (LevelChunk chunk : chunks) {
-                this.tickSpawningChunk(chunk, time, categories, state);
-            }
-        }, ParallelProcessor.tickPool);
-    }
-
-    @WrapOperation(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ServerChunkCache;tickSpawningChunk(Lnet/minecraft/world/level/chunk/LevelChunk;JLjava/util/List;Lnet/minecraft/world/level/NaturalSpawner$SpawnState;)V"))
-    private void async$wrapTickSpawning(
-            ServerChunkCache instance, LevelChunk chunk, long timeInhabited,
-            List<MobCategory> categories, NaturalSpawner.SpawnState state,
-            Operation<Void> original
-    ) {
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
-            original.call(instance, chunk, timeInhabited, categories, state);
+        if (this.async$firstRunSpawnCounts) {
+            this.async$firstRunSpawnCounts = false;
+            this.async$spawnCountsReady.set(true);
         }
-    }
-
-
-
-    @WrapOperation(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/level/ChunkMap;forEachBlockTickingChunk(Ljava/util/function/Consumer;)V"))
-    private void async$wrapBlockTicking(ChunkMap instance, Consumer<LevelChunk> consumer, Operation<Void> original) {
-        CompletableFuture<Void> spawnFut = async$spawnFuture;
-        if (spawnFut != null) {
-            async$pumpUntilDone(spawnFut);
-            if (spawnFut.isCompletedExceptionally()) {
-                spawnFut.join();
-            }
-            async$spawnFuture = null;
-        }
-
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncRandomTicks) {
-            original.call(instance, consumer);
-            return;
-        }
-
-        List<LevelChunk> chunks = new ArrayList<>();
-        original.call(instance, (Consumer<LevelChunk>) chunks::add);
-
-        if (chunks.isEmpty()) return;
-
-        int poolSize = ParallelProcessor.getPoolSize();
-        int batchSize = Math.max(1, (chunks.size() + poolSize - 1) / poolSize);
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
-
-        for (int i = 0; i < chunks.size(); i += batchSize) {
-            int start = i;
-            int end = Math.min(i + batchSize, chunks.size());
-            futures.add(CompletableFuture.runAsync(() -> {
-                for (int j = start; j < end; j++) {
-                    consumer.accept(chunks.get(j));
+        if (this.async$spawnCountsReady.getAndSet(false)) {
+            int naturalSpawnChunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+            int generation = async$nextSpawnStateGeneration();
+            try {
+                async$getSpawnExecutor().execute(() -> {
+                    try {
+                        NaturalSpawner.SpawnState spawnState = async$createSpawnState(naturalSpawnChunkCount);
+                        if (async$tryPublishSpawnStateAsync(generation, spawnState)) {
+                            this.async$consecutiveSpawnStateFailures.set(0);
+                        }
+                    } catch (AsyncSpawnCacheMissException ignored) {
+                        async$recordAsyncSpawnStateFailure("chunk cache miss", null);
+                    } catch (ParallelProcessor.AsyncAbortException ignored) {
+                    } catch (Throwable throwable) {
+                        async$recordAsyncSpawnStateFailure("error", throwable);
+                    } finally {
+                        this.async$spawnCountsReady.set(true);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                this.async$spawnCountsReady.set(true);
+                if (!ParallelProcessor.isShuttingDown()) {
+                    async$publishSpawnStateSync(naturalSpawnChunkCount);
                 }
-            }, ParallelProcessor.tickPool));
-        }
-
-        async$pumpUntilDone(CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)));
-    }
-
-    @Unique
-    private void async$pumpUntilDone(CompletableFuture<?> future) {
-        while (!future.isDone()) {
-            boolean pumped = false;
-            for (ServerLevel lvl : ParallelProcessor.getServer().getAllLevels()) {
-                pumped |= lvl.getChunkSource().pollTask();
             }
-            if (!pumped) Thread.onSpinWait();
-        }
-        if (future.isCompletedExceptionally()) {
-            future.join();
         }
     }
 
+    @WrapMethod(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V")
+    private void tickChunksSpawn(ProfilerFiller profiler, long timeInhabited, Operation<Void> original) {
+        profiler.push("naturalSpawnCount");
+        int naturalSpawnChunkCount = this.distanceManager.getNaturalSpawnChunkCount();
+        boolean forceSyncSpawn = this.async$forceSyncSpawnNextTick.getAndSet(false);
+
+        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn || this.async$firstRunSpawnCounts || forceSyncSpawn) {
+            async$publishSpawnStateSync(naturalSpawnChunkCount);
+            if (forceSyncSpawn) {
+                this.async$consecutiveSpawnStateFailures.set(0);
+            }
+        }
+
+        boolean spawnMobs = this.level.getGameRules().get(GameRules.SPAWN_MOBS);
+        int randomTickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+        boolean useAsyncSpawn = !AsyncConfig.disabled && AsyncConfig.enableAsyncSpawn && !forceSyncSpawn;
+        List<MobCategory> spawnCategories;
+        if (spawnMobs) {
+            boolean rareSpawnTick = this.level.getGameTime() % 400L == 0L;
+            spawnCategories = NaturalSpawner.getFilteredSpawningCategories(
+                    Objects.requireNonNull(this.lastSpawnState),
+                    true,
+                    this.spawnEnemies,
+                    rareSpawnTick
+            );
+        } else {
+            spawnCategories = List.of();
+        }
+
+        profiler.popPush("tickSpawningChunks");
+
+        if (useAsyncSpawn) {
+            NaturalSpawner.SpawnState currentState = this.lastSpawnState;
+            if (currentState != null) {
+                try {
+                    CompletableFuture.runAsync(() -> {
+                        List<LevelChunk> chunks = new ArrayList<>();
+                        this.chunkMap.collectSpawningChunks(chunks);
+                        Util.shuffle(chunks, this.level.random);
+                        for (LevelChunk levelChunk : chunks) {
+                            if (levelChunk != null) {
+                                this.tickSpawningChunk(levelChunk, timeInhabited, spawnCategories, currentState);
+                            }
+                        }
+                    }, async$getSpawnExecutor()).whenComplete((unused, throwable) -> {
+                        if (throwable == null) {
+                            this.async$consecutiveSpawnChunkFailures.set(0);
+                            return;
+                        }
+                        if (async$isSpawnCacheMiss(throwable)) {
+                            async$recordAsyncSpawnChunkFailure("chunk cache miss", null);
+                            return;
+                        }
+                        if (ParallelProcessor.isAbortThrowable(throwable)) {
+                            return;
+                        }
+                        async$recordAsyncSpawnChunkFailure("error", throwable);
+                    });
+                } catch (RejectedExecutionException e) {
+                    if (!ParallelProcessor.isShuttingDown()) {
+                        async$runSyncSpawnChunks(profiler, timeInhabited, spawnCategories, currentState);
+                    }
+                }
+            }
+        } else {
+            async$runSyncSpawnChunks(profiler, timeInhabited, spawnCategories, this.lastSpawnState);
+            if (forceSyncSpawn) {
+                this.async$consecutiveSpawnChunkFailures.set(0);
+            }
+        }
+
+        profiler.popPush("tickTickingChunks");
+        this.chunkMap.forEachBlockTickingChunk(chunk -> this.level.tickChunk(chunk, randomTickSpeed));
+        if (spawnMobs) {
+            profiler.popPush("customSpawners");
+            this.level.tickCustomSpawners(this.spawnEnemies);
+        }
+        profiler.pop();
+    }
+
     @Unique
-    private void async$applyMonsterCountOffset(NaturalSpawner.SpawnState state) {
-        if (!(state instanceof AsyncMonsterGlobalCapControl control)) {
+    private Executor async$getSpawnExecutor() {
+        return ParallelProcessor.spawnPool != null ? ParallelProcessor.spawnPool : ParallelProcessor.tickPool;
+    }
+
+    @Unique
+    private boolean async$shouldAbortChunkWait() {
+        return ParallelProcessor.isShuttingDown() || Thread.currentThread().isInterrupted();
+    }
+
+    @Unique
+    private boolean async$isSpawnCacheMiss(Throwable throwable) {
+        while (throwable != null) {
+            if (throwable instanceof AsyncSpawnCacheMissException) {
+                return true;
+            }
+            throwable = throwable.getCause();
+        }
+        return false;
+    }
+
+    @Unique
+    private void async$recordAsyncSpawnStateFailure(String reason, @Nullable Throwable throwable) {
+        if (ParallelProcessor.isShuttingDown() || !AsyncConfig.enableAsyncSpawn) {
             return;
         }
-        int atomicMonsterCount = control.async$getAtomicMobCount(MobCategory.MONSTER);
-        int sectionMonsterCount = this.async$countSectionStorageMonsters();
-        control.async$setMonsterCountOffset(sectionMonsterCount - atomicMonsterCount);
+
+        this.async$forceSyncSpawnNextTick.set(true);
+        int failures = this.async$consecutiveSpawnStateFailures.incrementAndGet();
+        async$handleAsyncSpawnFailure("spawn state creation", failures, reason, throwable);
     }
 
     @Unique
-    @SuppressWarnings("unchecked")
-    private int async$countSectionStorageMonsters() {
-        PersistentEntitySectionManager<Entity> entityManager =
-                ((ServerLevelAccessor) this.level).async$getEntityManager();
-        EntitySectionStorage<Entity> sectionStorage =
-                ((PersistentEntitySectionManagerAccessor<Entity>) entityManager).async$getSectionStorage();
+    private void async$recordAsyncSpawnChunkFailure(String reason, @Nullable Throwable throwable) {
+        if (ParallelProcessor.isShuttingDown() || !AsyncConfig.enableAsyncSpawn) {
+            return;
+        }
 
-        Set<java.util.UUID> seen = new HashSet<>();
-        int[] count = new int[1];
+        this.async$forceSyncSpawnNextTick.set(true);
+        int failures = this.async$consecutiveSpawnChunkFailures.incrementAndGet();
+        async$handleAsyncSpawnFailure("spawn chunk execution", failures, reason, throwable);
+    }
 
-        sectionStorage.getAllChunksWithExistingSections().forEach(chunkKey ->
-                sectionStorage.getExistingSectionsInChunk(chunkKey).forEach(section -> this.async$countSectionMonsters(section, seen, count))
+    @Unique
+    private void async$handleAsyncSpawnFailure(String phase, int failures, String reason, @Nullable Throwable throwable) {
+        async$recordSpawnFallbackSummary("spawn state creation".equals(phase));
+
+        int threshold = AsyncConfig.maxConsecutiveAsyncSpawnFailures;
+        if (threshold > 0 && failures >= threshold && AsyncConfig.enableAsyncSpawn) {
+            AsyncConfig.enableAsyncSpawn = false;
+            async$clearSpawnFallbackSummary();
+            boolean persisted = async$persistAsyncSpawnDisable();
+            String message = "Disabling async entity spawning after {} consecutive {} failures in {} (reason: {}). {}";
+            String persistenceMessage = persisted
+                    ? "Saved enableAsyncSpawn=false to config."
+                    : "Runtime flag disabled, but saving config failed.";
+            if (throwable != null) {
+                ParallelProcessor.LOGGER.error(message, failures, phase, this.level.dimension().toString(), reason, persistenceMessage, throwable);
+            } else {
+                ParallelProcessor.LOGGER.error(message, failures, phase, this.level.dimension().toString(), reason, persistenceMessage);
+            }
+        }
+    }
+
+    @Unique
+    private boolean async$persistAsyncSpawnDisable() {
+        try {
+            PlatformUtils.saveConfig();
+            return true;
+        } catch (Throwable throwable) {
+            ParallelProcessor.LOGGER.error("Failed to save async spawn circuit breaker state to config", throwable);
+            return false;
+        }
+    }
+
+    @Unique
+    private synchronized void async$recordSpawnFallbackSummary(boolean spawnStateFailure) {
+        if (this.async$spawnFallbackSummaryWindowStartNanos == 0L) {
+            this.async$spawnFallbackSummaryWindowStartNanos = System.nanoTime();
+        }
+
+        if (spawnStateFailure) {
+            this.async$spawnStateFallbackSummaryCount++;
+        } else {
+            this.async$spawnChunkFallbackSummaryCount++;
+        }
+    }
+
+    @Unique
+    private synchronized void async$flushSpawnFallbackSummaryIfDue() {
+        long windowStartNanos = this.async$spawnFallbackSummaryWindowStartNanos;
+        if (windowStartNanos == 0L) {
+            return;
+        }
+
+        long elapsedNanos = System.nanoTime() - windowStartNanos;
+        if (elapsedNanos < async$SPAWN_FALLBACK_SUMMARY_INTERVAL_NANOS) {
+            return;
+        }
+
+        int spawnStateFallbacks = this.async$spawnStateFallbackSummaryCount;
+        int spawnChunkFallbacks = this.async$spawnChunkFallbackSummaryCount;
+        int totalFallbacks = spawnStateFallbacks + spawnChunkFallbacks;
+
+        this.async$spawnFallbackSummaryWindowStartNanos = 0L;
+        this.async$spawnStateFallbackSummaryCount = 0;
+        this.async$spawnChunkFallbackSummaryCount = 0;
+
+        if (totalFallbacks <= 0) {
+            return;
+        }
+
+        ParallelProcessor.LOGGER.warn(
+                "Async spawn fell back to synchronous spawning {} time(s) in {} over the last 5 minutes (state creation: {}, chunk execution: {})",
+                totalFallbacks,
+                this.level.dimension().toString(),
+                spawnStateFallbacks,
+                spawnChunkFallbacks
         );
-        return count[0];
     }
 
     @Unique
-    private void async$countSectionMonsters(EntitySection<Entity> section, Set<java.util.UUID> seen, int[] count) {
-        if (!section.getStatus().isAccessible()) {
-            return;
-        }
+    private synchronized void async$clearSpawnFallbackSummary() {
+        this.async$spawnFallbackSummaryWindowStartNanos = 0L;
+        this.async$spawnStateFallbackSummaryCount = 0;
+        this.async$spawnChunkFallbackSummaryCount = 0;
+    }
 
-        section.getEntities().forEach(entity -> {
-            if (async$isNaturalMonsterCounted(entity) && seen.add(entity.getUUID())) {
-                count[0]++;
+    @Unique
+    private void async$runSyncSpawnChunks(ProfilerFiller profiler, long timeInhabited, List<MobCategory> spawnCategories, @Nullable NaturalSpawner.SpawnState spawnState) {
+        List<LevelChunk> chunks = this.spawningChunks;
+        try {
+            profiler.popPush("filteringSpawningChunks");
+            this.chunkMap.collectSpawningChunks(chunks);
+            profiler.popPush("shuffleSpawningChunks");
+            Util.shuffle(chunks, this.level.random);
+            profiler.popPush("tickSpawningChunks");
+
+            for (LevelChunk levelChunk : chunks) {
+                this.tickSpawningChunk(levelChunk, timeInhabited, spawnCategories, spawnState);
             }
-        });
-    }
-
-    @Unique
-    private static boolean async$isNaturalMonsterCounted(Entity entity) {
-        if (entity.getType().getCategory() != MobCategory.MONSTER) {
-            return false;
+        } finally {
+            chunks.clear();
         }
-        if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
-            return false;
-        }
-        return true;
     }
 }
