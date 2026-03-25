@@ -18,7 +18,7 @@ import net.minecraft.server.level.ChunkGenerationTask;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.GenerationChunkHolder;
-import net.minecraft.server.level.PlayerMap;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.entity.Entity;
@@ -56,7 +56,7 @@ public abstract class ChunkMapMixin extends SimpleRegionStorage implements Chunk
 
     @Shadow
     @Final
-    private PlayerMap playerMap;
+    private ServerLevel level;
 
     @Shadow
     private volatile Long2ObjectLinkedOpenHashMap<ChunkHolder> visibleChunkMap;
@@ -128,7 +128,7 @@ public abstract class ChunkMapMixin extends SimpleRegionStorage implements Chunk
     @Unique
     private List<ServerPlayer> async$collectPlayersCloseForSpawning(ChunkPos chunkPos) {
         List<ServerPlayer> players = new ArrayList<>();
-        for (ServerPlayer player : this.playerMap.getAllPlayers()) {
+        for (ServerPlayer player : this.level.players()) {
             if (async$isPlayerCloseEnoughForSpawning(player, chunkPos)) {
                 players.add(player);
             }

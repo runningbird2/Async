@@ -102,6 +102,9 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private final AtomicBoolean async$forceSyncSpawnNextTick = new AtomicBoolean(false);
 
     @Unique
+    private volatile CompletableFuture<Void> async$spawnFuture;
+
+    @Unique
     private static final AsyncSpawnCacheMissException async$SPAWN_CACHE_MISS = new AsyncSpawnCacheMissException();
 
     @Unique
@@ -200,28 +203,31 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private void shortcutGetChunkNow(int chunkX, int chunkZ, CallbackInfoReturnable<LevelChunk> cir) {
         if (Thread.currentThread() != this.mainThread) {
             ChunkHolder holder = this.getVisibleChunkIfPresent(ChunkPos.asLong(chunkX, chunkZ));
-            if (holder != null) {
-                if (ParallelProcessor.isSpawnExecutionThread()) {
-                    LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
-                    cir.setReturnValue(levelChunk);
-                    return;
-                }
-
+            if (holder == null) {
                 if (ParallelProcessor.isTickExecutionThread()) {
-                    LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
-                    if (levelChunk != null) {
-                        cir.setReturnValue(levelChunk);
-                        return;
-                    }
                     throw new ParallelProcessor.AsyncAbortException();
                 }
-
-                CompletableFuture<ChunkResult<ChunkAccess>> future = holder.scheduleChunkGenerationTask(ChunkStatus.FULL, this.chunkMap);
-                ChunkAccess chunk = future.getNow(ChunkHolder.UNLOADED_CHUNK).orElse(null);
-                if (chunk instanceof LevelChunk worldChunk) {
-                    cir.setReturnValue(worldChunk);
-                }
+                cir.setReturnValue(null);
+                return;
             }
+
+            LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+            if (levelChunk != null) {
+                cir.setReturnValue(levelChunk);
+                return;
+            }
+
+            LevelChunk tickingChunk = holder.getTickingChunk();
+            if (tickingChunk != null) {
+                cir.setReturnValue(tickingChunk);
+                return;
+            }
+
+            if (ParallelProcessor.isTickExecutionThread()) {
+                throw new ParallelProcessor.AsyncAbortException();
+            }
+
+            cir.setReturnValue(null);
         }
     }
 
@@ -327,6 +333,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         int naturalSpawnChunkCount = this.distanceManager.getNaturalSpawnChunkCount();
         boolean forceSyncSpawn = this.async$forceSyncSpawnNextTick.getAndSet(false);
 
+        async$awaitSpawnFutureIfPresent();
+
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn || this.async$firstRunSpawnCounts || forceSyncSpawn) {
             async$publishSpawnStateSync(naturalSpawnChunkCount);
             if (forceSyncSpawn) {
@@ -356,7 +364,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             NaturalSpawner.SpawnState currentState = this.lastSpawnState;
             if (currentState != null) {
                 try {
-                    CompletableFuture.runAsync(() -> {
+                    this.async$spawnFuture = CompletableFuture.runAsync(() -> {
                         List<LevelChunk> chunks = new ArrayList<>();
                         this.chunkMap.collectSpawningChunks(chunks);
                         Util.shuffle(chunks, this.level.random);
@@ -365,21 +373,23 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                                 this.tickSpawningChunk(levelChunk, timeInhabited, spawnCategories, currentState);
                             }
                         }
-                    }, async$getSpawnExecutor()).whenComplete((unused, throwable) -> {
+                    }, async$getSpawnExecutor()).handle((unused, throwable) -> {
                         if (throwable == null) {
                             this.async$consecutiveSpawnChunkFailures.set(0);
-                            return;
+                            return null;
                         }
                         if (async$isSpawnCacheMiss(throwable)) {
                             async$recordAsyncSpawnChunkFailure("chunk cache miss", null);
-                            return;
+                            return null;
                         }
                         if (ParallelProcessor.isAbortThrowable(throwable)) {
-                            return;
+                            return null;
                         }
                         async$recordAsyncSpawnChunkFailure("error", throwable);
+                        return null;
                     });
                 } catch (RejectedExecutionException e) {
+                    this.async$spawnFuture = null;
                     if (!ParallelProcessor.isShuttingDown()) {
                         async$runSyncSpawnChunks(profiler, timeInhabited, spawnCategories, currentState);
                     }
@@ -391,6 +401,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                 this.async$consecutiveSpawnChunkFailures.set(0);
             }
         }
+
+        async$awaitSpawnFutureIfPresent();
 
         profiler.popPush("tickTickingChunks");
         this.chunkMap.forEachBlockTickingChunk(chunk -> this.level.tickChunk(chunk, randomTickSpeed));
@@ -404,6 +416,30 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     @Unique
     private Executor async$getSpawnExecutor() {
         return ParallelProcessor.spawnPool != null ? ParallelProcessor.spawnPool : ParallelProcessor.tickPool;
+    }
+
+    @Unique
+    private void async$awaitSpawnFutureIfPresent() {
+        CompletableFuture<Void> future = this.async$spawnFuture;
+        if (future == null) {
+            return;
+        }
+
+        while (!future.isDone()) {
+            if (ParallelProcessor.isShuttingDown()) {
+                break;
+            }
+
+            boolean pumped = false;
+            for (ServerLevel lvl : ParallelProcessor.getServer().getAllLevels()) {
+                pumped |= lvl.getChunkSource().pollTask();
+            }
+            if (!pumped) {
+                Thread.onSpinWait();
+            }
+        }
+
+        this.async$spawnFuture = null;
     }
 
     @Unique
