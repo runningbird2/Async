@@ -10,6 +10,7 @@ import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
+import com.axalotl.async.common.spawn.AsyncServerChunkCacheSpawnStateAccess;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
@@ -64,7 +65,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 
 @Mixin(value = ServerChunkCache.class, priority = 1500)
-public abstract class ServerChunkCacheMixin extends ChunkSource {
+public abstract class ServerChunkCacheMixin extends ChunkSource implements AsyncServerChunkCacheSpawnStateAccess {
     @Shadow
     @Final
     public ChunkMap chunkMap;
@@ -295,6 +296,11 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
                 spawnPotential,
                 localMobCapCalculator
         );
+    }
+
+    @Override
+    public @Nullable NaturalSpawner.SpawnState async$getLastSpawnState() {
+        return this.lastSpawnState;
     }
 
     @WrapMethod(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V")

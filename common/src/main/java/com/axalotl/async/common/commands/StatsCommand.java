@@ -3,16 +3,23 @@ package com.axalotl.async.common.commands;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.platform.Permission;
+import com.axalotl.async.common.spawn.AsyncServerChunkCacheSpawnStateAccess;
+import com.axalotl.async.common.spawn.AsyncSpawnStateMobcapAccess;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.NaturalSpawner;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -40,6 +47,16 @@ public class StatsCommand {
                                 .executes(cmdCtx -> {
                                     int count = IntegerArgumentType.getInteger(cmdCtx, "count");
                                     showEntityStats(cmdCtx.getSource(), count);
+                                    return 1;
+                                })))
+                .then(literal("mobcap")
+                        .executes(cmdCtx -> {
+                            showMobcapStats(cmdCtx.getSource(), cmdCtx.getSource().getPlayerOrException());
+                            return 1;
+                        })
+                        .then(argument("player", EntityArgument.player())
+                                .executes(cmdCtx -> {
+                                    showMobcapStats(cmdCtx.getSource(), EntityArgument.getPlayer(cmdCtx, "player"));
                                     return 1;
                                 }))));
     }
@@ -162,5 +179,61 @@ public class StatsCommand {
 
             source.sendSuccess(() -> message, false);
         });
+    }
+
+    private static void showMobcapStats(CommandSourceStack source, ServerPlayer target) {
+        NaturalSpawner.SpawnState spawnState = ((AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource()).async$getLastSpawnState();
+        if (!(spawnState instanceof AsyncSpawnStateMobcapAccess mobcapAccess)) {
+            source.sendFailure(prefix.copy()
+                    .append(Component.literal("Mobcap state is not available right now.").withStyle(ChatFormatting.RED)));
+            return;
+        }
+
+        ChunkPos chunkPos = target.chunkPosition();
+        MutableComponent message = prefix.copy()
+                .append(Component.literal("Mobcaps for ").withStyle(ChatFormatting.WHITE))
+                .append(target.getDisplayName().copy().withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("\nWorld: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(target.level().dimension().identifier().toString()).withStyle(ChatFormatting.AQUA))
+                .append(Component.literal("\nChunk: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(chunkPos.x + ", " + chunkPos.z).withStyle(ChatFormatting.GREEN));
+
+        for (MobCategory category : MobCategory.values()) {
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+
+            int limit = category.getMaxInstancesPerChunk();
+            int count = mobcapAccess.async$getLocalMobCount(target, category);
+            int headroom = mobcapAccess.async$getLocalMobHeadroom(target, category);
+
+            message.append(Component.literal("\n" + async$formatCategoryName(category) + ": ").withStyle(ChatFormatting.YELLOW))
+                    .append(Component.literal(String.valueOf(count)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
+                    .append(Component.literal(String.valueOf(limit)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("  remaining ").withStyle(ChatFormatting.GRAY))
+                    .append(Component.literal(String.valueOf(headroom)).withStyle(headroom > 0 ? ChatFormatting.AQUA : ChatFormatting.RED));
+        }
+
+        source.sendSuccess(() -> message, false);
+    }
+
+    private static String async$formatCategoryName(MobCategory category) {
+        String[] parts = category.getName().split("_");
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) {
+                builder.append(' ');
+            }
+            String part = parts[i];
+            if (part.isEmpty()) {
+                continue;
+            }
+            builder.append(Character.toUpperCase(part.charAt(0)));
+            if (part.length() > 1) {
+                builder.append(part.substring(1));
+            }
+        }
+        return builder.toString();
     }
 }
