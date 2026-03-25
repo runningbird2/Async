@@ -3,9 +3,17 @@ package com.axalotl.async.common.mixin.server;
 import com.axalotl.async.common.AsyncSpawnCacheMissException;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
+import com.axalotl.async.common.mixin.entity.spawn.SpawnStateConstructorInvoker;
 import com.axalotl.async.common.platform.PlatformUtils;
+import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
+import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
+import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
+import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
+import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateTask;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ChunkResult;
@@ -14,10 +22,14 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Util;
 import net.minecraft.util.profiling.ProfilerFiller;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
 import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.PotentialCalculator;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkSource;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
@@ -31,7 +43,6 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.ArrayList;
@@ -39,9 +50,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -96,13 +110,16 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     private boolean async$firstRunSpawnCounts = true;
 
     @Unique
-    private final AtomicBoolean async$spawnCountsReady = new AtomicBoolean(false);
-
-    @Unique
     private final AtomicBoolean async$forceSyncSpawnNextTick = new AtomicBoolean(false);
 
     @Unique
     private volatile CompletableFuture<Void> async$spawnFuture;
+
+    @Unique
+    private volatile @Nullable AsyncPreparedSpawnStateTask async$preparedSpawnStateTask;
+
+    @Unique
+    private long async$spawnStateTick;
 
     @Unique
     private static final AsyncSpawnCacheMissException async$SPAWN_CACHE_MISS = new AsyncSpawnCacheMissException();
@@ -115,12 +132,6 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
 
     @Unique
     private final AtomicInteger async$consecutiveSpawnChunkFailures = new AtomicInteger(0);
-
-    @Unique
-    private final AtomicInteger async$spawnStateGeneration = new AtomicInteger(0);
-
-    @Unique
-    private final Object async$spawnStateLock = new Object();
 
     @Unique
     private long async$spawnFallbackSummaryWindowStartNanos;
@@ -250,96 +261,70 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         NaturalSpawner.ChunkGetter chunkGetter = ParallelProcessor.isSpawnExecutionThread()
                 ? this::async$getLoadedFullChunkOrThrow
                 : this::getFullChunk;
-        return NaturalSpawner.createState(
-                naturalSpawnChunkCount,
-                this.level.getAllEntities(),
-                chunkGetter,
-                new LocalMobCapCalculator(this.chunkMap)
-        );
-    }
+        PotentialCalculator spawnPotential = new PotentialCalculator();
+        Object2IntOpenHashMap<MobCategory> mobCategoryCounts = new Object2IntOpenHashMap<>(MobCategory.values().length);
+        LocalMobCapCalculator localMobCapCalculator = new LocalMobCapCalculator(this.chunkMap);
 
-    @Unique
-    private void async$publishSpawnStateSync(int naturalSpawnChunkCount) {
-        synchronized (this.async$spawnStateLock) {
-            this.async$spawnStateGeneration.incrementAndGet();
-            this.lastSpawnState = async$createSpawnState(naturalSpawnChunkCount);
-        }
-    }
-
-    @Unique
-    private int async$nextSpawnStateGeneration() {
-        synchronized (this.async$spawnStateLock) {
-            return this.async$spawnStateGeneration.incrementAndGet();
-        }
-    }
-
-    @Unique
-    private boolean async$tryPublishSpawnStateAsync(int generation, NaturalSpawner.SpawnState spawnState) {
-        synchronized (this.async$spawnStateLock) {
-            if (!AsyncConfig.enableAsyncSpawn || ParallelProcessor.isShuttingDown()) {
-                return false;
-            }
-            if (this.async$spawnStateGeneration.get() != generation) {
-                return false;
+        for (Entity entity : this.level.getAllEntities()) {
+            if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
+                continue;
             }
 
-            this.lastSpawnState = spawnState;
-            return true;
-        }
-    }
+            MobCategory category = entity.getType().getCategory();
+            if (category == MobCategory.MISC || !async$countsTowardSpawnCap(entity)) {
+                continue;
+            }
 
-    @Inject(method = "tickChunks()V", at = @At("TAIL"))
-    private void tickChunks(CallbackInfo ci) {
-        async$flushSpawnFallbackSummaryIfDue();
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) {
-            return;
-        }
-
-        if (this.async$firstRunSpawnCounts) {
-            this.async$firstRunSpawnCounts = false;
-            this.async$spawnCountsReady.set(true);
-        }
-        if (this.async$spawnCountsReady.getAndSet(false)) {
-            int naturalSpawnChunkCount = this.distanceManager.getNaturalSpawnChunkCount();
-            int generation = async$nextSpawnStateGeneration();
-            try {
-                async$getSpawnExecutor().execute(() -> {
-                    try {
-                        NaturalSpawner.SpawnState spawnState = async$createSpawnState(naturalSpawnChunkCount);
-                        if (async$tryPublishSpawnStateAsync(generation, spawnState)) {
-                            this.async$consecutiveSpawnStateFailures.set(0);
-                        }
-                    } catch (AsyncSpawnCacheMissException ignored) {
-                        async$recordAsyncSpawnStateFailure("chunk cache miss", null);
-                    } catch (ParallelProcessor.AsyncAbortException ignored) {
-                    } catch (Throwable throwable) {
-                        async$recordAsyncSpawnStateFailure("error", throwable);
-                    } finally {
-                        this.async$spawnCountsReady.set(true);
-                    }
-                });
-            } catch (RejectedExecutionException e) {
-                this.async$spawnCountsReady.set(true);
-                if (!ParallelProcessor.isShuttingDown()) {
-                    async$publishSpawnStateSync(naturalSpawnChunkCount);
+            BlockPos blockPos = entity.blockPosition();
+            chunkGetter.query(ChunkPos.asLong(blockPos), levelChunk -> {
+                var mobSpawnCost = NaturalSpawner.getRoughBiome(blockPos, levelChunk).getMobSettings().getMobSpawnCost(entity.getType());
+                if (mobSpawnCost != null) {
+                    spawnPotential.addCharge(blockPos, mobSpawnCost.charge());
                 }
-            }
+
+                if (entity instanceof Mob) {
+                    localMobCapCalculator.addMob(levelChunk.getPos(), category);
+                }
+                mobCategoryCounts.addTo(category, 1);
+            });
         }
+
+        return SpawnStateConstructorInvoker.async$createSpawnState(
+                naturalSpawnChunkCount,
+                mobCategoryCounts,
+                spawnPotential,
+                localMobCapCalculator
+        );
     }
 
     @WrapMethod(method = "tickChunks(Lnet/minecraft/util/profiling/ProfilerFiller;J)V")
     private void tickChunksSpawn(ProfilerFiller profiler, long timeInhabited, Operation<Void> original) {
+        async$flushSpawnFallbackSummaryIfDue();
         profiler.push("naturalSpawnCount");
         int naturalSpawnChunkCount = this.distanceManager.getNaturalSpawnChunkCount();
         boolean forceSyncSpawn = this.async$forceSyncSpawnNextTick.getAndSet(false);
 
         async$awaitSpawnFutureIfPresent();
 
-        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn || this.async$firstRunSpawnCounts || forceSyncSpawn) {
-            async$publishSpawnStateSync(naturalSpawnChunkCount);
+        boolean asyncSpawnEnabled = !AsyncConfig.disabled && AsyncConfig.enableAsyncSpawn;
+        long currentTick = asyncSpawnEnabled ? ++this.async$spawnStateTick : 0L;
+
+        if (!asyncSpawnEnabled || forceSyncSpawn) {
+            async$cancelPreparedSpawnStateTask();
+            this.lastSpawnState = async$createSpawnState(naturalSpawnChunkCount);
+            this.async$firstRunSpawnCounts = false;
             if (forceSyncSpawn) {
                 this.async$consecutiveSpawnStateFailures.set(0);
             }
+        } else {
+            NaturalSpawner.SpawnState preparedState = async$consumePreparedSpawnState(currentTick, naturalSpawnChunkCount);
+            if (preparedState != null) {
+                this.lastSpawnState = preparedState;
+                this.async$consecutiveSpawnStateFailures.set(0);
+            } else {
+                this.lastSpawnState = async$createSpawnState(naturalSpawnChunkCount);
+            }
+            this.async$firstRunSpawnCounts = false;
         }
 
         boolean spawnMobs = this.level.getGameRules().get(GameRules.SPAWN_MOBS);
@@ -410,12 +395,26 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
             profiler.popPush("customSpawners");
             this.level.tickCustomSpawners(this.spawnEnemies);
         }
+
+        if (asyncSpawnEnabled) {
+            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = async$capturePreparedSpawnEntities(this.level.getAllEntities());
+            async$schedulePreparedSpawnState(currentTick + 1L, naturalSpawnChunkCount, entitySnapshot);
+        }
         profiler.pop();
     }
 
     @Unique
     private Executor async$getSpawnExecutor() {
         return ParallelProcessor.spawnPool != null ? ParallelProcessor.spawnPool : ParallelProcessor.tickPool;
+    }
+
+    @Unique
+    private void async$cancelPreparedSpawnStateTask() {
+        AsyncPreparedSpawnStateTask task = this.async$preparedSpawnStateTask;
+        if (task != null && !task.future().isDone()) {
+            task.future().cancel(true);
+        }
+        this.async$preparedSpawnStateTask = null;
     }
 
     @Unique
@@ -445,6 +444,97 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
     @Unique
     private boolean async$shouldAbortChunkWait() {
         return ParallelProcessor.isShuttingDown() || Thread.currentThread().isInterrupted();
+    }
+
+    @Unique
+    private @Nullable NaturalSpawner.SpawnState async$consumePreparedSpawnState(long currentTick, int spawnableChunkCount) {
+        AsyncPreparedSpawnStateTask task = this.async$preparedSpawnStateTask;
+        if (task == null) {
+            return null;
+        }
+
+        if (task.targetTick() < currentTick) {
+            task.future().cancel(true);
+            this.async$preparedSpawnStateTask = null;
+            async$recordAsyncSpawnStateFailure("prepared spawn state missed target tick", null);
+            return null;
+        }
+
+        if (task.targetTick() != currentTick) {
+            return null;
+        }
+
+        if (!task.future().isDone()) {
+            task.future().cancel(true);
+            this.async$preparedSpawnStateTask = null;
+            async$recordAsyncSpawnStateFailure("prepared spawn state not ready for target tick", null);
+            return null;
+        }
+
+        this.async$preparedSpawnStateTask = null;
+        try {
+            return task.future().get().toSpawnState(this.chunkMap, spawnableChunkCount);
+        } catch (CancellationException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (ExecutionException | RuntimeException e) {
+            if (async$isSpawnCacheMiss(e) || ParallelProcessor.isAbortThrowable(e)) {
+                async$recordAsyncSpawnStateFailure("chunk cache miss", null);
+                return null;
+            }
+            async$recordAsyncSpawnStateFailure("prepared spawn state consumption error", e);
+            return null;
+        }
+    }
+
+    @Unique
+    private void async$schedulePreparedSpawnState(
+            long targetTick,
+            int spawnableChunkCount,
+            List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot
+    ) {
+        if (ParallelProcessor.isShuttingDown()) {
+            async$cancelPreparedSpawnStateTask();
+            return;
+        }
+
+        AsyncPreparedSpawnStateTask existingTask = this.async$preparedSpawnStateTask;
+        if (existingTask != null) {
+            if (existingTask.targetTick() >= targetTick) {
+                return;
+            }
+            if (!existingTask.future().isDone()) {
+                existingTask.future().cancel(true);
+                this.async$preparedSpawnStateTask = null;
+            }
+        }
+
+        try {
+            Future<AsyncPreparedSpawnState> future = ((java.util.concurrent.ExecutorService) async$getSpawnExecutor()).submit(
+                    () -> {
+                        try {
+                            return AsyncPreparedSpawnStateBuilder.build(
+                                    entitySnapshot,
+                                    this.level
+                            );
+                        } catch (CancellationException e) {
+                            throw e;
+                        } catch (Throwable t) {
+                            if (ParallelProcessor.isAbortThrowable(t)) {
+                                throw async$SPAWN_CACHE_MISS;
+                            }
+                            ParallelProcessor.LOGGER.error("Error while building async prepared spawn state", t);
+                            throw t;
+                        }
+                    }
+            );
+            this.async$preparedSpawnStateTask = new AsyncPreparedSpawnStateTask(targetTick, future);
+        } catch (RejectedExecutionException e) {
+            async$recordAsyncSpawnStateFailure("prepared spawn state scheduling unavailable", e);
+            this.async$preparedSpawnStateTask = null;
+        }
     }
 
     @Unique
@@ -581,5 +671,39 @@ public abstract class ServerChunkCacheMixin extends ChunkSource {
         } finally {
             chunks.clear();
         }
+    }
+
+    @Unique
+    private static List<AsyncPreparedSpawnEntitySnapshot> async$capturePreparedSpawnEntities(Iterable<Entity> entities) {
+        List<AsyncPreparedSpawnEntitySnapshot> entitySnapshot = new ArrayList<>();
+        for (Entity entity : entities) {
+            if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
+                continue;
+            }
+            if (!async$countsTowardSpawnCap(entity)) {
+                continue;
+            }
+
+            EntityType<?> entityType = entity.getType();
+            MobCategory category = entityType.getCategory();
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+
+            BlockPos blockPos = entity.blockPosition();
+            entitySnapshot.add(new AsyncPreparedSpawnEntitySnapshot(
+                    blockPos.immutable(),
+                    ChunkPos.asLong(blockPos),
+                    entityType,
+                    category,
+                    async$countsTowardSpawnCap(entity)
+            ));
+        }
+        return entitySnapshot;
+    }
+
+    @Unique
+    private static boolean async$countsTowardSpawnCap(Entity entity) {
+        return entity instanceof Mob mob && ((AsyncMobcapTrackedMob) mob).async$countsTowardSpawnCap();
     }
 }

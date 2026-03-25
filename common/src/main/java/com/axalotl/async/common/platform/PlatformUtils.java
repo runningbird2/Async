@@ -1,6 +1,7 @@
 package com.axalotl.async.common.platform;
 
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.world.entity.Mob;
 
 import java.util.ServiceLoader;
 
@@ -30,6 +31,10 @@ public class PlatformUtils {
 
     public static boolean hasPermission(CommandSourceStack source, String node, int level) {
         return minecraftPlatform.hasPermission(source, node, level);
+    }
+
+    public static int getMaxSpawnClusterSize(Mob mob) {
+        return minecraftPlatform.getMaxSpawnClusterSize(mob);
     }
 
 

@@ -5,8 +5,10 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.Permission;
 import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.world.entity.Mob;
 import net.neoforged.neoforge.server.permission.PermissionAPI;
 import net.neoforged.neoforge.server.permission.nodes.PermissionNode;
+import net.neoforged.neoforge.event.EventHooks;
 
 public class NeoForgeMinecraftPlatform implements MinecraftPlatform {
     @Override
@@ -22,5 +24,10 @@ public class NeoForgeMinecraftPlatform implements MinecraftPlatform {
         }
 
         return PermissionAPI.getPermission(player, permission);
+    }
+
+    @Override
+    public int getMaxSpawnClusterSize(Mob mob) {
+        return EventHooks.getMaxSpawnClusterSize(mob);
     }
 }
