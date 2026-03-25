@@ -112,6 +112,17 @@ public class SpawnStateMixin implements AsyncSpawnStateMobcapAccess {
         return Math.max(0, atomicCount + this.async$monsterCountOffset);
     }
 
+    @Override
+    public int async$getGlobalMobCap(MobCategory category) {
+        int magicNumber = (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1) * (2 * NaturalSpawner.SPAWN_DISTANCE_CHUNK + 1);
+        return category.getMaxInstancesPerChunk() * this.spawnableChunkCount / magicNumber;
+    }
+
+    @Override
+    public int async$getSpawnableChunkCount() {
+        return this.spawnableChunkCount;
+    }
+
     public int async$getLocalMobCount(ServerPlayer player, MobCategory category) {
         return this.async$getLocalMobCapCalculator().async$getMobCount(player, category);
     }

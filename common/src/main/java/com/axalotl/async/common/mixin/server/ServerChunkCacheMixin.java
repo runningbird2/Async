@@ -6,6 +6,7 @@ import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.mixin.entity.spawn.SpawnStateConstructorInvoker;
 import com.axalotl.async.common.platform.PlatformUtils;
 import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
+import com.axalotl.async.common.spawn.AsyncMonsterGlobalCapControl;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnEntitySnapshot;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnState;
 import com.axalotl.async.common.spawn.AsyncPreparedSpawnStateBuilder;
@@ -51,6 +52,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -652,6 +654,11 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
                 spawnStateFallbacks,
                 spawnChunkFallbacks
         );
+        ParallelProcessor.LOGGER.warn(
+                "Async spawn fallback global mobcaps in {}: {}",
+                this.level.dimension().toString(),
+                async$describeGlobalMobcaps(this.lastSpawnState)
+        );
     }
 
     @Unique
@@ -659,6 +666,23 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         this.async$spawnFallbackSummaryWindowStartNanos = 0L;
         this.async$spawnStateFallbackSummaryCount = 0;
         this.async$spawnChunkFallbackSummaryCount = 0;
+    }
+
+    @Unique
+    private String async$describeGlobalMobcaps(@Nullable NaturalSpawner.SpawnState spawnState) {
+        if (!(spawnState instanceof AsyncMonsterGlobalCapControl mobcapControl)) {
+            return "unavailable";
+        }
+
+        StringJoiner joiner = new StringJoiner(", ");
+        joiner.add("spawnableChunks=" + mobcapControl.async$getSpawnableChunkCount());
+        for (MobCategory category : MobCategory.values()) {
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+            joiner.add(category.getName() + "=" + mobcapControl.async$getEffectiveMobCount(category) + "/" + mobcapControl.async$getGlobalMobCap(category));
+        }
+        return joiner.toString();
     }
 
     @Unique

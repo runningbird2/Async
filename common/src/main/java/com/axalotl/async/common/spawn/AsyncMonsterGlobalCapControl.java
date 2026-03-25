@@ -9,4 +9,8 @@ public interface AsyncMonsterGlobalCapControl {
     int async$getAtomicMobCount(MobCategory category);
 
     int async$getEffectiveMobCount(MobCategory category);
+
+    int async$getGlobalMobCap(MobCategory category);
+
+    int async$getSpawnableChunkCount();
 }
