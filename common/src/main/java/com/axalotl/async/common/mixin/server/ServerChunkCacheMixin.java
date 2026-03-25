@@ -341,8 +341,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         List<MobCategory> spawnCategories;
         if (spawnMobs) {
             boolean rareSpawnTick = this.level.getGameTime() % 400L == 0L;
-            spawnCategories = NaturalSpawner.getFilteredSpawningCategories(
-                    Objects.requireNonNull(this.lastSpawnState),
+            spawnCategories = async$getFairSpawningCategories(
                     true,
                     this.spawnEnemies,
                     rareSpawnTick
@@ -666,6 +665,26 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         this.async$spawnFallbackSummaryWindowStartNanos = 0L;
         this.async$spawnStateFallbackSummaryCount = 0;
         this.async$spawnChunkFallbackSummaryCount = 0;
+    }
+
+    @Unique
+    private static List<MobCategory> async$getFairSpawningCategories(
+            boolean spawnFriendlies,
+            boolean spawnEnemies,
+            boolean spawnPassives
+    ) {
+        List<MobCategory> categories = new ArrayList<>();
+        for (MobCategory category : MobCategory.values()) {
+            if (category == MobCategory.MISC) {
+                continue;
+            }
+            if ((spawnFriendlies || !category.isFriendly())
+                    && (spawnEnemies || category.isFriendly())
+                    && (spawnPassives || !category.isPersistent())) {
+                categories.add(category);
+            }
+        }
+        return categories;
     }
 
     @Unique
