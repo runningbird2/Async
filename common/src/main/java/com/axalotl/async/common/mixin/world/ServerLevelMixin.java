@@ -5,6 +5,8 @@ import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.parallelised.utils.ItemFluidPrecompute;
 import com.axalotl.async.common.parallelised.ConcurrentCollections;
 import com.axalotl.async.common.parallelised.ConcurrentList;
+import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
+import com.axalotl.async.common.spawn.AsyncSpawnCapMarkingContext;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -240,5 +242,13 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
                     explosionSound
             );
         }
+    }
+
+    @WrapMethod(method = "addFreshEntity(Lnet/minecraft/world/entity/Entity;)Z")
+    private boolean async$markSpawnCapTrackedAdds(Entity entity, Operation<Boolean> original) {
+        if (AsyncSpawnCapMarkingContext.isActive() && entity instanceof Mob mob) {
+            ((AsyncMobcapTrackedMob) mob).async$setCountsTowardSpawnCap(true);
+        }
+        return original.call(entity);
     }
 }

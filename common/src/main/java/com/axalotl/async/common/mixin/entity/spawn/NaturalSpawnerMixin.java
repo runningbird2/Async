@@ -1,9 +1,8 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
 import com.axalotl.async.common.platform.PlatformUtils;
-import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
+import com.axalotl.async.common.spawn.AsyncSpawnCapMarkingContext;
 import com.axalotl.async.common.spawn.AsyncSpawnStateMobcapAccess;
-import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import net.minecraft.SharedConstants;
@@ -12,7 +11,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
 import net.minecraft.util.profiling.Profiler;
 import net.minecraft.util.profiling.ProfilerFiller;
-import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
@@ -21,7 +19,6 @@ import net.minecraft.world.entity.SpawnGroupData;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.NaturalSpawner;
-import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.block.state.BlockState;
@@ -29,9 +26,7 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Invoker;
-import org.spongepowered.asm.mixin.injection.At;
 
 import java.util.List;
 import java.util.Optional;
@@ -61,13 +56,18 @@ public abstract class NaturalSpawnerMixin {
             }
 
             if (maxSpawns == Integer.MAX_VALUE) {
-                NaturalSpawner.spawnCategoryForChunk(
-                        category,
-                        level,
-                        chunk,
-                        spawnStateInvoker::async$invokeCanSpawn,
-                        spawnStateInvoker::async$invokeAfterSpawn
-                );
+                AsyncSpawnCapMarkingContext.push();
+                try {
+                    NaturalSpawner.spawnCategoryForChunk(
+                            category,
+                            level,
+                            chunk,
+                            spawnStateInvoker::async$invokeCanSpawn,
+                            spawnStateInvoker::async$invokeAfterSpawn
+                    );
+                } finally {
+                    AsyncSpawnCapMarkingContext.pop();
+                }
                 continue;
             }
 
@@ -189,8 +189,12 @@ public abstract class NaturalSpawnerMixin {
                         EntitySpawnReason.NATURAL,
                         spawnGroupData
                 );
-                async$markEntityForSpawnCap(mob);
-                level.addFreshEntityWithPassengers(mob);
+                AsyncSpawnCapMarkingContext.push();
+                try {
+                    level.addFreshEntityWithPassengers(mob);
+                } finally {
+                    AsyncSpawnCapMarkingContext.pop();
+                }
                 if (!mob.isRemoved()) {
                     spawnedTotal++;
                     spawnedInGroup++;
@@ -206,36 +210,22 @@ public abstract class NaturalSpawnerMixin {
         }
     }
 
-    @WrapOperation(
-            method = "spawnCategoryForPosition",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lnet/minecraft/server/level/ServerLevel;addFreshEntityWithPassengers(Lnet/minecraft/world/entity/Entity;)V"
-            )
-    )
-    private static void async$markVanillaNaturalSpawns(ServerLevel level, Entity entity, Operation<Void> original) {
-        async$markEntityForSpawnCap(entity);
-        original.call(level, entity);
-    }
-
-    @WrapOperation(
-            method = "spawnMobsForChunkGeneration",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lnet/minecraft/world/level/ServerLevelAccessor;addFreshEntityWithPassengers(Lnet/minecraft/world/entity/Entity;)V"
-            )
-    )
-    private static void async$markChunkGenerationSpawns(ServerLevelAccessor levelAccessor, Entity entity, Operation<Void> original) {
-        async$markEntityForSpawnCap(entity);
-        original.call(levelAccessor, entity);
-    }
-
-    @Unique
-    private static void async$markEntityForSpawnCap(Entity entity) {
-        if (entity instanceof Mob mob) {
-            ((AsyncMobcapTrackedMob) mob).async$setCountsTowardSpawnCap(true);
+    @WrapMethod(method = "spawnMobsForChunkGeneration")
+    private static void async$markChunkGenerationSpawns(
+            net.minecraft.world.level.ServerLevelAccessor levelAccessor,
+            net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome,
+            ChunkPos chunkPos,
+            net.minecraft.util.RandomSource randomSource,
+            Operation<Void> original
+    ) {
+        AsyncSpawnCapMarkingContext.push();
+        try {
+            original.call(levelAccessor, biome, chunkPos, randomSource);
+        } finally {
+            AsyncSpawnCapMarkingContext.pop();
         }
     }
+
 }
 
 @Mixin(NaturalSpawner.class)
