@@ -101,19 +101,14 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
         ProfilerFiller profilerfiller = Profiler.get();
 
         List<Entity> toTick = new ArrayList<>();
-        List<Entity> toDespawnCheck = new ArrayList<>();
 
         this.entityTickList.forEach(entity -> {
             if (entity == null || entity.isRemoved()) return;
             if (this.tickRateManager().isEntityFrozen(entity)) return;
 
-            if (!AsyncConfig.disabled && AsyncConfig.enableAsyncSpawn) {
-                toDespawnCheck.add(entity);
-            } else {
-                profilerfiller.push("checkDespawn");
-                entity.checkDespawn();
-                profilerfiller.pop();
-            }
+            profilerfiller.push("checkDespawn");
+            entity.checkDespawn();
+            profilerfiller.pop();
 
             if (!this.chunkSource.chunkMap.getDistanceManager()
                     .inEntityTickingRange(entity.chunkPosition().toLong())) return;
@@ -126,33 +121,6 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
 
             toTick.add(entity);
         });
-
-        if (!toDespawnCheck.isEmpty()) {
-            int poolSize = ParallelProcessor.getPoolSize();
-            int chunkSize = Math.max(1, (toDespawnCheck.size() + poolSize - 1) / poolSize);
-            List<Future<Void>> despawnFutures = new ArrayList<>();
-            for (int i = 0; i < toDespawnCheck.size(); i += chunkSize) {
-                List<Entity> chunk = toDespawnCheck.subList(i, Math.min(i + chunkSize, toDespawnCheck.size()));
-                despawnFutures.add(ParallelProcessor.tickPool.submit(() -> {
-                    for (Entity e : chunk) e.checkDespawn();
-                    return (Void) null;
-                }));
-            }
-            boolean allDone;
-            do {
-                allDone = true;
-                for (Future<Void> f : despawnFutures) {
-                    if (!f.isDone()) { allDone = false; break; }
-                }
-                if (!allDone) {
-                    boolean pumped = false;
-                    for (ServerLevel lvl : ParallelProcessor.getServer().getAllLevels()) {
-                        pumped |= lvl.getChunkSource().pollTask();
-                    }
-                    if (!pumped) Thread.onSpinWait();
-                }
-            } while (!allDone);
-        }
 
         async$precomputeItemFluidStates(toTick);
 
