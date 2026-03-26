@@ -104,16 +104,21 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
         ParallelProcessor.flushAsyncAbortFallbackSummariesIfDue();
 
         List<Entity> toTick = new ArrayList<>();
+        List<Entity> toDespawnCheck = new ArrayList<>();
 
         this.entityTickList.forEach(entity -> {
             if (entity == null || entity.isRemoved()) return;
             if (this.tickRateManager().isEntityFrozen(entity)) return;
 
-            profilerfiller.push("checkDespawn");
-            entity.checkDespawn();
-            profilerfiller.pop();
+            if (!AsyncConfig.disabled && AsyncConfig.enableAsyncSpawn) {
+                toDespawnCheck.add(entity);
+            } else {
+                profilerfiller.push("checkDespawn");
+                entity.checkDespawn();
+                profilerfiller.pop();
 
-            if (entity.isRemoved()) return;
+                if (entity.isRemoved()) return;
+            }
 
             if (!this.chunkSource.chunkMap.getDistanceManager()
                     .inEntityTickingRange(entity.chunkPosition().toLong())) return;
@@ -126,6 +131,13 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
 
             toTick.add(entity);
         });
+
+        if (!toDespawnCheck.isEmpty()) {
+            profilerfiller.push("checkDespawn");
+            ParallelProcessor.callEntityDespawnCheckBatch(toDespawnCheck);
+            profilerfiller.pop();
+            toTick.removeIf(Entity::isRemoved);
+        }
 
         async$precomputeItemFluidStates(toTick);
 
