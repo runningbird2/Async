@@ -3,6 +3,7 @@ package com.axalotl.async.common.mixin.world;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.parallelised.utils.ItemFluidPrecompute;
+import com.axalotl.async.common.parallelised.utils.AsyncNavigationTracker;
 import com.axalotl.async.common.parallelised.ConcurrentCollections;
 import com.axalotl.async.common.parallelised.ConcurrentList;
 import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
@@ -57,7 +58,7 @@ import java.util.function.Predicate;
 
 @SuppressWarnings("all")
 @Mixin(value = ServerLevel.class, priority = 1500)
-public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
+public abstract class ServerLevelMixin extends Level implements WorldGenLevel, AsyncNavigationTracker {
 
     @Shadow
     @Final
@@ -185,6 +186,11 @@ public abstract class ServerLevelMixin extends Level implements WorldGenLevel {
             fluidMap.put(positions[i], results[i]);
         }
         ItemFluidPrecompute.activate(fluidMap);
+    }
+
+    @Override
+    public boolean async$isNavigationActive(Mob mob) {
+        return this.navigatingMobs.contains(mob);
     }
 
     @Redirect(method = "blockEvent", at = @At(value = "INVOKE", target = "Lit/unimi/dsi/fastutil/objects/ObjectLinkedOpenHashSet;add(Ljava/lang/Object;)Z", remap = false))
