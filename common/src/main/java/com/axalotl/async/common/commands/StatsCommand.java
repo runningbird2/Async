@@ -3,6 +3,7 @@ package com.axalotl.async.common.commands;
 import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.platform.Permission;
+import com.axalotl.async.common.spawn.AsyncMobcapTrackedMob;
 import com.axalotl.async.common.spawn.AsyncServerChunkCacheSpawnStateAccess;
 import com.axalotl.async.common.spawn.AsyncSpawnStateMobcapAccess;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -10,18 +11,24 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.NaturalSpawner;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -47,6 +54,16 @@ public class StatsCommand {
                                 .executes(cmdCtx -> {
                                     int count = IntegerArgumentType.getInteger(cmdCtx, "count");
                                     showEntityStats(cmdCtx.getSource(), count);
+                                    return 1;
+                                })))
+                .then(literal("breakdown")
+                        .executes(cmdCtx -> {
+                            showMobcapBreakdown(cmdCtx.getSource(), cmdCtx.getSource().getPlayerOrException());
+                            return 1;
+                        })
+                        .then(argument("player", EntityArgument.player())
+                                .executes(cmdCtx -> {
+                                    showMobcapBreakdown(cmdCtx.getSource(), EntityArgument.getPlayer(cmdCtx, "player"));
                                     return 1;
                                 })))
                 .then(literal("mobcap")
@@ -225,6 +242,174 @@ public class StatsCommand {
         }
 
         source.sendSuccess(() -> message, false);
+    }
+
+    private static void showMobcapBreakdown(CommandSourceStack source, ServerPlayer target) {
+        NaturalSpawner.SpawnState spawnState = ((AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource()).async$getLastSpawnState();
+        AsyncSpawnStateMobcapAccess mobcapAccess = spawnState instanceof AsyncSpawnStateMobcapAccess access ? access : null;
+
+        List<ServerPlayer> players = new ArrayList<>(target.level().players());
+        int totalMonsters = 0;
+        int currentCountedMonsters = 0;
+        int excludedPersistentMonsters = 0;
+        int flaggedTrackedMonsters = 0;
+        int flaggedCountedMonsters = 0;
+        int flaggedExcludedMonsters = 0;
+        int unflaggedCountedMonsters = 0;
+        int zeroNearbyMonsters = 0;
+        int singleNearbyMonsters = 0;
+        int sharedNearbyMonsters = 0;
+        int maxNearbyPlayers = 0;
+
+        for (Entity entity : target.level().getAllEntities()) {
+            if (!entity.isAlive() || entity.getType().getCategory() != MobCategory.MONSTER) {
+                continue;
+            }
+
+            totalMonsters++;
+
+            int nearbyPlayers = async$countPlayersCloseForSpawning(players, new ChunkPos(entity.blockPosition()));
+            maxNearbyPlayers = Math.max(maxNearbyPlayers, nearbyPlayers);
+            if (nearbyPlayers <= 0) {
+                zeroNearbyMonsters++;
+            } else if (nearbyPlayers == 1) {
+                singleNearbyMonsters++;
+            } else {
+                sharedNearbyMonsters++;
+            }
+
+            boolean excludedByPersistence = entity instanceof Mob mob
+                    && (mob.isPersistenceRequired() || mob.requiresCustomPersistence());
+            boolean flaggedTracked = entity instanceof Mob mob
+                    && ((AsyncMobcapTrackedMob) mob).async$countsTowardSpawnCap();
+
+            if (flaggedTracked) {
+                flaggedTrackedMonsters++;
+            }
+
+            if (excludedByPersistence) {
+                excludedPersistentMonsters++;
+                if (flaggedTracked) {
+                    flaggedExcludedMonsters++;
+                }
+                continue;
+            }
+
+            currentCountedMonsters++;
+            if (flaggedTracked) {
+                flaggedCountedMonsters++;
+            } else {
+                unflaggedCountedMonsters++;
+            }
+        }
+
+        int localLimit = MobCategory.MONSTER.getMaxInstancesPerChunk();
+        int playersAtLocalCap = 0;
+        int summedLocalMonsterCounts = 0;
+        List<Map.Entry<ServerPlayer, Integer>> localMonsterCounts = new ArrayList<>();
+
+        if (mobcapAccess != null) {
+            for (ServerPlayer player : players) {
+                int localCount = mobcapAccess.async$getLocalMobCount(player, MobCategory.MONSTER);
+                summedLocalMonsterCounts += localCount;
+                if (localCount >= localLimit) {
+                    playersAtLocalCap++;
+                }
+                localMonsterCounts.add(Map.entry(player, localCount));
+            }
+            localMonsterCounts.sort(Comparator
+                    .<Map.Entry<ServerPlayer, Integer>>comparingInt(Map.Entry::getValue)
+                    .reversed()
+                    .thenComparing(entry -> entry.getKey().getScoreboardName(), String.CASE_INSENSITIVE_ORDER));
+        }
+
+        MutableComponent message = prefix.copy()
+                .append(Component.literal("Monster Mobcap Breakdown").withStyle(ChatFormatting.GOLD))
+                .append(Component.literal("\nWorld: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(target.level().dimension().identifier().toString()).withStyle(ChatFormatting.AQUA))
+                .append(Component.literal("\nPlayers: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(players.size())).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nAlive Monsters: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(totalMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nCounted By Current Spawn State: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(currentCountedMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nExcluded By Persistence: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(excludedPersistentMonsters)).withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("\nMarked Natural/ChunkGen: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(flaggedTrackedMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nMarked And Counted Now: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(flaggedCountedMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nMarked But Excluded Now: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(flaggedExcludedMonsters)).withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("\nUnmarked But Counted Now: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(unflaggedCountedMonsters)).withStyle(unflaggedCountedMonsters > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
+                .append(Component.literal("\nNearby Player Coverage: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("0=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(zeroNearbyMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("  1=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(singleNearbyMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("  2+=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(sharedNearbyMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nMax Nearby Players On A Monster Chunk: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(maxNearbyPlayers)).withStyle(ChatFormatting.GREEN));
+
+        if (mobcapAccess != null) {
+            int globalCount = mobcapAccess.async$getEffectiveMobCount(MobCategory.MONSTER);
+            int globalLimit = mobcapAccess.async$getGlobalMobCap(MobCategory.MONSTER);
+            int spawnableChunks = mobcapAccess.async$getSpawnableChunkCount();
+
+            message.append(Component.literal("\nSpawn State Monster Global: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(globalCount)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
+                    .append(Component.literal(String.valueOf(globalLimit)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("\nSpawnable Chunks: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(spawnableChunks)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("\nSummed Per-Player Local Monsters: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(summedLocalMonsterCounts)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("\nPlayers At Local Cap: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal(String.valueOf(playersAtLocalCap)).withStyle(ChatFormatting.GREEN))
+                    .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
+                    .append(Component.literal(String.valueOf(players.size())).withStyle(ChatFormatting.GREEN));
+
+            if (!localMonsterCounts.isEmpty()) {
+                message.append(Component.literal("\nTop Local Monster Counts:").withStyle(ChatFormatting.GOLD));
+                int entriesToShow = Math.min(10, localMonsterCounts.size());
+                for (int i = 0; i < entriesToShow; i++) {
+                    Map.Entry<ServerPlayer, Integer> entry = localMonsterCounts.get(i);
+                    message.append(Component.literal("\n" + (i + 1) + ". ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(entry.getKey().getScoreboardName()).withStyle(ChatFormatting.YELLOW))
+                            .append(Component.literal(": ").withStyle(ChatFormatting.GRAY))
+                            .append(Component.literal(String.valueOf(entry.getValue())).withStyle(ChatFormatting.GREEN))
+                            .append(Component.literal("/").withStyle(ChatFormatting.DARK_GRAY))
+                            .append(Component.literal(String.valueOf(localLimit)).withStyle(ChatFormatting.GREEN));
+                }
+            }
+        } else {
+            message.append(Component.literal("\nSpawn State: ").withStyle(ChatFormatting.WHITE))
+                    .append(Component.literal("unavailable").withStyle(ChatFormatting.RED));
+        }
+
+        source.sendSuccess(() -> message, false);
+    }
+
+    private static int async$countPlayersCloseForSpawning(List<ServerPlayer> players, ChunkPos chunkPos) {
+        double chunkCenterX = SectionPos.sectionToBlockCoord(chunkPos.x, 8);
+        double chunkCenterZ = SectionPos.sectionToBlockCoord(chunkPos.z, 8);
+        int nearbyPlayers = 0;
+
+        for (ServerPlayer player : players) {
+            if (player.isSpectator()) {
+                continue;
+            }
+
+            double deltaX = chunkCenterX - player.getX();
+            double deltaZ = chunkCenterZ - player.getZ();
+            if (deltaX * deltaX + deltaZ * deltaZ < 16384.0) {
+                nearbyPlayers++;
+            }
+        }
+
+        return nearbyPlayers;
     }
 
     private static String async$formatCategoryName(MobCategory category) {
