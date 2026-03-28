@@ -245,10 +245,18 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         }
 
         LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
-        if (levelChunk == null) {
-            throw async$SPAWN_CACHE_MISS;
+        if (levelChunk != null) {
+            fullChunkGetter.accept(levelChunk);
+            return;
         }
-        fullChunkGetter.accept(levelChunk);
+
+        LevelChunk tickingChunk = holder.getTickingChunk();
+        if (tickingChunk != null) {
+            fullChunkGetter.accept(tickingChunk);
+            return;
+        }
+
+        throw async$SPAWN_CACHE_MISS;
     }
 
     @Unique
