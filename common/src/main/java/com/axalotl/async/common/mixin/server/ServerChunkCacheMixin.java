@@ -359,6 +359,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
             } catch (RejectedExecutionException e) {
                 this.async$spawnCountsReady.set(true);
                 if (!ParallelProcessor.isShuttingDown()) {
+                    async$recordAsyncSpawnStateSchedulingFailure(e);
                     async$publishSpawnStateSync(naturalSpawnChunkCount);
                 }
             }
@@ -480,7 +481,17 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
 
         this.async$forceSyncSpawnNextTick.set(true);
         int failures = this.async$consecutiveSpawnStateFailures.incrementAndGet();
-        async$handleAsyncSpawnFailure("spawn state creation", failures, reason, throwable);
+        async$handleAsyncSpawnFailure(true, "spawn state creation", failures, reason, throwable);
+    }
+
+    @Unique
+    private void async$recordAsyncSpawnStateSchedulingFailure(@Nullable Throwable throwable) {
+        if (ParallelProcessor.isShuttingDown() || !AsyncConfig.enableAsyncSpawn) {
+            return;
+        }
+
+        int failures = this.async$consecutiveSpawnStateFailures.incrementAndGet();
+        async$handleAsyncSpawnFailure(true, "spawn state scheduling", failures, "executor unavailable", throwable);
     }
 
     @Unique
@@ -491,12 +502,12 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
 
         this.async$forceSyncSpawnNextTick.set(true);
         int failures = this.async$consecutiveSpawnChunkFailures.incrementAndGet();
-        async$handleAsyncSpawnFailure("spawn chunk execution", failures, reason, throwable);
+        async$handleAsyncSpawnFailure(false, "spawn chunk execution", failures, reason, throwable);
     }
 
     @Unique
-    private void async$handleAsyncSpawnFailure(String phase, int failures, String reason, @Nullable Throwable throwable) {
-        async$recordSpawnFallbackSummary("spawn state creation".equals(phase));
+    private void async$handleAsyncSpawnFailure(boolean spawnStateFailure, String phase, int failures, String reason, @Nullable Throwable throwable) {
+        async$recordSpawnFallbackSummary(spawnStateFailure);
 
         int threshold = AsyncConfig.maxConsecutiveAsyncSpawnFailures;
         if (threshold > 0 && failures >= threshold && AsyncConfig.enableAsyncSpawn) {
