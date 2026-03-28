@@ -5,10 +5,12 @@ import com.axalotl.async.common.ParallelProcessor;
 import com.axalotl.async.common.config.AsyncConfig;
 import com.axalotl.async.common.mixin.entity.spawn.SpawnStateConstructorInvoker;
 import com.axalotl.async.common.platform.PlatformUtils;
+import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
 import com.axalotl.async.common.spawn.AsyncMonsterGlobalCapControl;
 import com.axalotl.async.common.spawn.AsyncServerChunkCacheSpawnStateAccess;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ChunkHolder;
@@ -260,6 +262,31 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
     }
 
     @Unique
+    private @Nullable LevelChunk async$getSpawnStateChunk(
+            long chunkPos,
+            NaturalSpawner.ChunkGetter chunkGetter,
+            Long2ObjectOpenHashMap<LevelChunk> chunkCache
+    ) {
+        LevelChunk cachedChunk = chunkCache.get(chunkPos);
+        if (cachedChunk != null) {
+            return cachedChunk;
+        }
+
+        final LevelChunk[] resolvedChunk = new LevelChunk[1];
+        chunkGetter.query(chunkPos, levelChunk -> resolvedChunk[0] = levelChunk);
+        LevelChunk levelChunk = resolvedChunk[0];
+        if (levelChunk == null) {
+            if (ParallelProcessor.isSpawnExecutionThread()) {
+                throw async$SPAWN_CACHE_MISS;
+            }
+            return null;
+        }
+
+        chunkCache.put(chunkPos, levelChunk);
+        return levelChunk;
+    }
+
+    @Unique
     private NaturalSpawner.SpawnState async$createSpawnState(int naturalSpawnChunkCount) {
         NaturalSpawner.ChunkGetter chunkGetter = ParallelProcessor.isSpawnExecutionThread()
                 ? this::async$getLoadedFullChunkOrThrow
@@ -267,6 +294,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         PotentialCalculator spawnPotential = new PotentialCalculator();
         Object2IntOpenHashMap<MobCategory> mobCategoryCounts = new Object2IntOpenHashMap<>(MobCategory.values().length);
         LocalMobCapCalculator localMobCapCalculator = new LocalMobCapCalculator(this.chunkMap);
+        Long2ObjectOpenHashMap<LevelChunk> chunkCache = new Long2ObjectOpenHashMap<>();
+        Long2ObjectOpenHashMap<int[]> chunkMobCounts = new Long2ObjectOpenHashMap<>();
 
         for (Entity entity : this.level.getAllEntities()) {
             if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
@@ -279,18 +308,30 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
             }
 
             BlockPos blockPos = entity.blockPosition();
-            chunkGetter.query(ChunkPos.asLong(blockPos), levelChunk -> {
-                var mobSpawnCost = NaturalSpawner.getRoughBiome(blockPos, levelChunk).getMobSettings().getMobSpawnCost(entity.getType());
-                if (mobSpawnCost != null) {
-                    spawnPotential.addCharge(blockPos, mobSpawnCost.charge());
-                }
+            long chunkPos = ChunkPos.asLong(blockPos);
+            LevelChunk levelChunk = async$getSpawnStateChunk(chunkPos, chunkGetter, chunkCache);
+            if (levelChunk == null) {
+                continue;
+            }
 
-                if (entity instanceof Mob) {
-                    localMobCapCalculator.addMob(levelChunk.getPos(), category);
+            var mobSpawnCost = NaturalSpawner.getRoughBiome(blockPos, levelChunk).getMobSettings().getMobSpawnCost(entity.getType());
+            if (mobSpawnCost != null) {
+                spawnPotential.addCharge(blockPos, mobSpawnCost.charge());
+            }
+
+            if (entity instanceof Mob) {
+                int[] counts = chunkMobCounts.get(chunkPos);
+                if (counts == null) {
+                    counts = new int[MobCategory.values().length];
+                    chunkMobCounts.put(chunkPos, counts);
                 }
-                mobCategoryCounts.addTo(category, 1);
-            });
+                counts[category.ordinal()]++;
+            }
+
+            mobCategoryCounts.addTo(category, 1);
         }
+
+        ((AsyncLocalMobCapCalculator) localMobCapCalculator).async$applyChunkCounts(chunkMobCounts);
 
         return SpawnStateConstructorInvoker.async$createSpawnState(
                 naturalSpawnChunkCount,
