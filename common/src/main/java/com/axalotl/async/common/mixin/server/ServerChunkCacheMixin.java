@@ -364,7 +364,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         for (int b = 0, idx = 0; b < chunks.length; b += batchSize, idx++) {
             int start = b;
             int end = Math.min(b + batchSize, chunks.length);
-            futures[idx] = CompletableFuture.runAsync(() -> {
+            futures[idx] = ParallelProcessor.submitSpawnTask(() -> {
                 AsyncSpawnPhaseContext.push();
                 try {
                     for (int i = start; i < end; i++) {
@@ -375,7 +375,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
                 } finally {
                     AsyncSpawnPhaseContext.pop();
                 }
-            }, ParallelProcessor.tickPool);
+            });
         }
 
         this.async$spawnFuture = CompletableFuture.allOf(futures);

@@ -55,7 +55,7 @@ public abstract class NaturalSpawnerMixin {
     @Inject(method = "createState", at = @At("HEAD"), cancellable = true)
     private static void async$createState(int spawnableChunkCount, Iterable<Entity> entities, NaturalSpawner.ChunkGetter chunkGetter, LocalMobCapCalculator localMobCapCalculator, CallbackInfoReturnable<NaturalSpawner.SpawnState> cir) {
         if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) return;
-        if (ParallelProcessor.tickPool == null) return;
+        if (ParallelProcessor.getSpawnExecutor() == null) return;
         cir.setReturnValue(async$createStateParallel(spawnableChunkCount, entities, chunkGetter, localMobCapCalculator));
     }
 

@@ -22,15 +22,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 public class ParallelProcessor {
     public static final Logger LOGGER = LogManager.getLogger(ParallelProcessor.class);
@@ -169,6 +172,67 @@ public class ParallelProcessor {
             return spawnExecutor.getCorePoolSize();
         }
         return 0;
+    }
+
+    public static ExecutorService getSpawnExecutor() {
+        return spawnPool != null ? spawnPool : tickPool;
+    }
+
+    public static CompletableFuture<Void> submitSpawnTask(Runnable task) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        Runnable wrapped = () -> {
+            try {
+                task.run();
+                future.complete(null);
+            } catch (Throwable throwable) {
+                future.completeExceptionally(throwable);
+            }
+        };
+
+        if (!async$tryScheduleSpawn(wrapped)) {
+            wrapped.run();
+        }
+
+        return future;
+    }
+
+    public static <T> CompletableFuture<T> supplySpawnTask(Supplier<T> supplier) {
+        CompletableFuture<T> future = new CompletableFuture<>();
+        Runnable wrapped = () -> {
+            try {
+                future.complete(supplier.get());
+            } catch (Throwable throwable) {
+                future.completeExceptionally(throwable);
+            }
+        };
+
+        if (!async$tryScheduleSpawn(wrapped)) {
+            wrapped.run();
+        }
+
+        return future;
+    }
+
+    private static boolean async$tryScheduleSpawn(Runnable task) {
+        ExecutorService primary = spawnPool != null ? spawnPool : tickPool;
+        if (async$tryExecute(primary, task)) {
+            return true;
+        }
+
+        return primary != tickPool && async$tryExecute(tickPool, task);
+    }
+
+    private static boolean async$tryExecute(ExecutorService executor, Runnable task) {
+        if (executor == null) {
+            return false;
+        }
+
+        try {
+            executor.execute(task);
+            return true;
+        } catch (RejectedExecutionException ignored) {
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")
