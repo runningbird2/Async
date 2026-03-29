@@ -23,4 +23,18 @@ public final class AsyncSpawnCapMarkingContext {
     public static boolean isActive() {
         return DEPTH.get() > 0;
     }
+
+    public static Scope enter() {
+        push();
+        return Scope.INSTANCE;
+    }
+
+    public enum Scope implements AutoCloseable {
+        INSTANCE;
+
+        @Override
+        public void close() {
+            pop();
+        }
+    }
 }

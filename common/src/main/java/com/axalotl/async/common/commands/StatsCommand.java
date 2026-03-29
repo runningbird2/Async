@@ -23,7 +23,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.NaturalSpawner;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -199,10 +198,9 @@ public class StatsCommand {
     }
 
     private static void showMobcapStats(CommandSourceStack source, ServerPlayer target) {
-        NaturalSpawner.SpawnState spawnState = ((AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource()).async$getLastSpawnState();
-        if (!(spawnState instanceof AsyncSpawnStateMobcapAccess mobcapAccess)) {
-            source.sendFailure(prefix.copy()
-                    .append(Component.literal("Mobcap state is not available right now.").withStyle(ChatFormatting.RED)));
+        AsyncSpawnStateMobcapAccess mobcapAccess = async$getMobcapAccess(target);
+        if (mobcapAccess == null) {
+            source.sendFailure(async$createMobcapUnavailableMessage());
             return;
         }
 
@@ -222,7 +220,7 @@ public class StatsCommand {
                 continue;
             }
 
-            int localLimit = category.getMaxInstancesPerChunk();
+            int localLimit = mobcapAccess.async$getLocalMobLimit(category);
             int localCount = mobcapAccess.async$getLocalMobCount(target, category);
             int headroom = mobcapAccess.async$getLocalMobHeadroom(target, category);
             int globalCount = mobcapAccess.async$getEffectiveMobCount(category);
@@ -245,8 +243,7 @@ public class StatsCommand {
     }
 
     private static void showMobcapBreakdown(CommandSourceStack source, ServerPlayer target) {
-        NaturalSpawner.SpawnState spawnState = ((AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource()).async$getLastSpawnState();
-        AsyncSpawnStateMobcapAccess mobcapAccess = spawnState instanceof AsyncSpawnStateMobcapAccess access ? access : null;
+        AsyncSpawnStateMobcapAccess mobcapAccess = async$getMobcapAccess(target);
 
         List<ServerPlayer> players = new ArrayList<>(target.level().players());
         int totalMonsters = 0;
@@ -281,7 +278,8 @@ public class StatsCommand {
             boolean excludedByPersistence = entity instanceof Mob mob
                     && (mob.isPersistenceRequired() || mob.requiresCustomPersistence());
             boolean flaggedTracked = entity instanceof Mob mob
-                    && ((AsyncMobcapTrackedMob) mob).async$countsTowardSpawnCap();
+                    && mob instanceof AsyncMobcapTrackedMob trackedMob
+                    && trackedMob.async$isMarkedForSpawnCapDebug();
 
             if (flaggedTracked) {
                 flaggedTrackedMonsters++;
@@ -303,7 +301,9 @@ public class StatsCommand {
             }
         }
 
-        int localLimit = MobCategory.MONSTER.getMaxInstancesPerChunk();
+        int localLimit = mobcapAccess != null
+                ? mobcapAccess.async$getLocalMobLimit(MobCategory.MONSTER)
+                : MobCategory.MONSTER.getMaxInstancesPerChunk();
         int playersAtLocalCap = 0;
         int summedLocalMonsterCounts = 0;
         List<Map.Entry<ServerPlayer, Integer>> localMonsterCounts = new ArrayList<>();
@@ -429,5 +429,17 @@ public class StatsCommand {
             }
         }
         return builder.toString();
+    }
+
+    private static AsyncSpawnStateMobcapAccess async$getMobcapAccess(ServerPlayer target) {
+        if (!(target.level().getChunkSource() instanceof AsyncServerChunkCacheSpawnStateAccess chunkCacheAccess)) {
+            return null;
+        }
+        return chunkCacheAccess.async$getMobcapDebugAccess();
+    }
+
+    private static MutableComponent async$createMobcapUnavailableMessage() {
+        return prefix.copy()
+                .append(Component.literal("Mobcap state is not available right now.").withStyle(ChatFormatting.RED));
     }
 }

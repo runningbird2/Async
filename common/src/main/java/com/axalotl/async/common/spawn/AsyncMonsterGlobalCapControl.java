@@ -13,4 +13,12 @@ public interface AsyncMonsterGlobalCapControl {
     int async$getGlobalMobCap(MobCategory category);
 
     int async$getSpawnableChunkCount();
+
+    default int async$getRemainingGlobalMobCapacity(MobCategory category) {
+        return this.async$getGlobalMobCap(category) - this.async$getEffectiveMobCount(category);
+    }
+
+    default boolean async$isGlobalMobCapReached(MobCategory category) {
+        return this.async$getRemainingGlobalMobCapacity(category) <= 0;
+    }
 }

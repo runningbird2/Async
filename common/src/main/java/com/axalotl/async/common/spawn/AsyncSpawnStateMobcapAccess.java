@@ -11,4 +11,12 @@ public interface AsyncSpawnStateMobcapAccess extends AsyncMonsterGlobalCapContro
     int async$getLocalMobHeadroom(ServerPlayer player, MobCategory category);
 
     int async$getMinLocalMobHeadroom(MobCategory category, ChunkPos chunkPos);
+
+    default int async$getLocalMobLimit(MobCategory category) {
+        return category.getMaxInstancesPerChunk();
+    }
+
+    default boolean async$isLocalMobCapReached(ServerPlayer player, MobCategory category) {
+        return this.async$getLocalMobHeadroom(player, category) <= 0;
+    }
 }

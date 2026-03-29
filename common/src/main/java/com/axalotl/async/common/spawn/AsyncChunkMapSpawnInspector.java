@@ -8,4 +8,9 @@ import java.util.List;
 public interface AsyncChunkMapSpawnInspector {
 
     List<ServerPlayer> async$getPlayersCloseForSpawningDirect(ChunkPos chunkPos);
+
+    default List<ServerPlayer> async$getPlayersCloseForSpawningDirectOrEmpty(ChunkPos chunkPos) {
+        List<ServerPlayer> players = this.async$getPlayersCloseForSpawningDirect(chunkPos);
+        return players != null ? players : List.of();
+    }
 }

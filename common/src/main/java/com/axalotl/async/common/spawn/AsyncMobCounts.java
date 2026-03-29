@@ -12,4 +12,8 @@ public interface AsyncMobCounts {
     default int async$getHeadroom(MobCategory category) {
         return category.getMaxInstancesPerChunk() - this.async$getCount(category);
     }
+
+    default boolean async$isAtCap(MobCategory category) {
+        return this.async$getHeadroom(category) <= 0;
+    }
 }
