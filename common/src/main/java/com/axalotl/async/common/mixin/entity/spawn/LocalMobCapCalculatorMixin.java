@@ -14,6 +14,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -32,6 +33,8 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
     public void async$applyChunkCounts(Long2ObjectMap<int[]> chunkMobCounts) {
         this.playersNearChunk.clear();
         this.playerMobCounts.clear();
+        Map<ServerPlayer, int[]> pendingPlayerCounts = new HashMap<>();
+
         for (Long2ObjectMap.Entry<int[]> entry : Long2ObjectMaps.fastIterable(chunkMobCounts)) {
             long chunkLong = entry.getLongKey();
             ChunkPos chunkPos = new ChunkPos(chunkLong);
@@ -41,9 +44,21 @@ public abstract class LocalMobCapCalculatorMixin implements AsyncLocalMobCapCalc
             }
             int[] counts = entry.getValue();
             for (ServerPlayer player : players) {
-                LocalMobCapCalculator.MobCounts mobCounts = this.playerMobCounts.computeIfAbsent(player, ignored -> MobCountsConstructorInvoker.async$createMobCounts());
-                ((AsyncMobCounts) mobCounts).async$addCounts(counts);
+                int[] playerCounts = pendingPlayerCounts.computeIfAbsent(
+                        player,
+                        ignored -> new int[net.minecraft.world.entity.MobCategory.values().length]
+                );
+                int limit = Math.min(playerCounts.length, counts.length);
+                for (int i = 0; i < limit; i++) {
+                    playerCounts[i] += counts[i];
+                }
             }
+        }
+
+        for (Map.Entry<ServerPlayer, int[]> entry : pendingPlayerCounts.entrySet()) {
+            LocalMobCapCalculator.MobCounts mobCounts = MobCountsConstructorInvoker.async$createMobCounts();
+            ((AsyncMobCounts) mobCounts).async$addCounts(entry.getValue());
+            this.playerMobCounts.put(entry.getKey(), mobCounts);
         }
     }
 
