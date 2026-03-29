@@ -46,7 +46,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.StringJoiner;
@@ -138,6 +140,12 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
 
     @Unique
     private int async$spawnChunkFallbackSummaryCount;
+
+    @Unique
+    private final Map<String, Integer> async$spawnStateMissReasonCounts = new LinkedHashMap<>();
+
+    @Unique
+    private final Map<String, Long> async$spawnStateMissReasonSampleChunks = new LinkedHashMap<>();
 
     @Shadow
     public abstract void tickSpawningChunk(LevelChunk chunk, long timeInhabited, List<MobCategory> spawnCategories, NaturalSpawner.SpawnState spawnState);
@@ -243,10 +251,11 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
     private void async$getLoadedFullChunkOrThrow(long chunkPos, Consumer<LevelChunk> fullChunkGetter) {
         ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPos);
         if (holder == null) {
-            throw async$SPAWN_CACHE_MISS;
+            throw new AsyncSpawnCacheMissException("visible chunk holder missing", chunkPos);
         }
 
-        LevelChunk levelChunk = holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
+        CompletableFuture<ChunkResult<LevelChunk>> fullChunkFuture = holder.getFullChunkFuture();
+        LevelChunk levelChunk = fullChunkFuture.getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null);
         if (levelChunk != null) {
             fullChunkGetter.accept(levelChunk);
             return;
@@ -258,7 +267,10 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
             return;
         }
 
-        throw async$SPAWN_CACHE_MISS;
+        String reason = fullChunkFuture.isDone()
+                ? "visible chunk has neither full nor ticking chunk"
+                : "visible chunk full future not ready and no ticking chunk";
+        throw new AsyncSpawnCacheMissException(reason, chunkPos);
     }
 
     @Unique
@@ -396,8 +408,8 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
                         if (async$tryPublishSpawnStateAsync(generation, spawnState)) {
                             this.async$consecutiveSpawnStateFailures.set(0);
                         }
-                    } catch (AsyncSpawnCacheMissException ignored) {
-                        async$recordAsyncSpawnStateFailure("chunk cache miss", null);
+                    } catch (AsyncSpawnCacheMissException miss) {
+                        async$recordAsyncSpawnStateFailure(miss);
                     } catch (ParallelProcessor.AsyncAbortException ignored) {
                     } catch (Throwable throwable) {
                         async$recordAsyncSpawnStateFailure("error", throwable);
@@ -534,6 +546,18 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
     }
 
     @Unique
+    private void async$recordAsyncSpawnStateFailure(AsyncSpawnCacheMissException miss) {
+        if (ParallelProcessor.isShuttingDown() || !AsyncConfig.enableAsyncSpawn) {
+            return;
+        }
+
+        this.async$forceSyncSpawnNextTick.set(true);
+        int failures = this.async$consecutiveSpawnStateFailures.incrementAndGet();
+        async$recordSpawnStateMissReason(miss);
+        async$handleAsyncSpawnFailure(true, "spawn state creation", failures, miss.async$getReason(), null);
+    }
+
+    @Unique
     private void async$recordAsyncSpawnStateSchedulingFailure(@Nullable Throwable throwable) {
         if (ParallelProcessor.isShuttingDown() || !AsyncConfig.enableAsyncSpawn) {
             return;
@@ -600,6 +624,15 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
     }
 
     @Unique
+    private synchronized void async$recordSpawnStateMissReason(AsyncSpawnCacheMissException miss) {
+        String reason = miss.async$getReason();
+        this.async$spawnStateMissReasonCounts.merge(reason, 1, Integer::sum);
+        if (miss.async$hasChunkPos()) {
+            this.async$spawnStateMissReasonSampleChunks.putIfAbsent(reason, miss.async$getChunkPos());
+        }
+    }
+
+    @Unique
     private synchronized void async$flushSpawnFallbackSummaryIfDue() {
         long windowStartNanos = this.async$spawnFallbackSummaryWindowStartNanos;
         if (windowStartNanos == 0L) {
@@ -614,10 +647,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         int spawnStateFallbacks = this.async$spawnStateFallbackSummaryCount;
         int spawnChunkFallbacks = this.async$spawnChunkFallbackSummaryCount;
         int totalFallbacks = spawnStateFallbacks + spawnChunkFallbacks;
+        String spawnStateReasonSummary = async$describeSpawnStateMissReasons();
 
         this.async$spawnFallbackSummaryWindowStartNanos = 0L;
         this.async$spawnStateFallbackSummaryCount = 0;
         this.async$spawnChunkFallbackSummaryCount = 0;
+        this.async$spawnStateMissReasonCounts.clear();
+        this.async$spawnStateMissReasonSampleChunks.clear();
 
         if (totalFallbacks <= 0) {
             return;
@@ -630,6 +666,13 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
                 spawnStateFallbacks,
                 spawnChunkFallbacks
         );
+        if (spawnStateFallbacks > 0 && !spawnStateReasonSummary.equals("unavailable")) {
+            ParallelProcessor.LOGGER.warn(
+                    "Async spawn state creation miss reasons in {}: {}",
+                    this.level.dimension().toString(),
+                    spawnStateReasonSummary
+            );
+        }
         ParallelProcessor.LOGGER.warn(
                 "Async spawn fallback global mobcaps in {}: {}",
                 this.level.dimension().toString(),
@@ -642,6 +685,36 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         this.async$spawnFallbackSummaryWindowStartNanos = 0L;
         this.async$spawnStateFallbackSummaryCount = 0;
         this.async$spawnChunkFallbackSummaryCount = 0;
+        this.async$spawnStateMissReasonCounts.clear();
+        this.async$spawnStateMissReasonSampleChunks.clear();
+    }
+
+    @Unique
+    private synchronized String async$describeSpawnStateMissReasons() {
+        if (this.async$spawnStateMissReasonCounts.isEmpty()) {
+            return "unavailable";
+        }
+
+        StringJoiner joiner = new StringJoiner(", ");
+        for (Map.Entry<String, Integer> entry : this.async$spawnStateMissReasonCounts.entrySet()) {
+            String reason = entry.getKey();
+            StringBuilder detail = new StringBuilder()
+                    .append(reason)
+                    .append('=')
+                    .append(entry.getValue());
+            Long sampleChunk = this.async$spawnStateMissReasonSampleChunks.get(reason);
+            if (sampleChunk != null) {
+                detail.append(" (sampleChunk=").append(async$formatChunkPos(sampleChunk)).append(')');
+            }
+            joiner.add(detail.toString());
+        }
+        return joiner.toString();
+    }
+
+    @Unique
+    private static String async$formatChunkPos(long chunkPos) {
+        ChunkPos pos = new ChunkPos(chunkPos);
+        return pos.x + "," + pos.z;
     }
 
     @Unique
