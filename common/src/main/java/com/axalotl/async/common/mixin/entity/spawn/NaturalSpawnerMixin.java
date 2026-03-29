@@ -8,6 +8,7 @@ import com.axalotl.async.common.parallelised.utils.ParallelSpawnHelper.SpawnResu
 import com.axalotl.async.common.platform.PlatformUtils;
 import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
 import com.axalotl.async.common.spawn.AsyncSpawnCapMarkingContext;
+import com.axalotl.async.common.spawn.AsyncSpawnPhaseContext;
 import com.axalotl.async.common.spawn.AsyncSpawnStateMobcapAccess;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
@@ -73,7 +74,13 @@ public abstract class NaturalSpawnerMixin {
         }
 
         Entity[] entityArray = entityList.toArray(new Entity[0]);
-        SpawnResult result = ParallelSpawnHelper.collectSpawnData(entityArray, chunkGetter);
+        SpawnResult result;
+        AsyncSpawnPhaseContext.push();
+        try {
+            result = ParallelSpawnHelper.collectSpawnData(entityArray, chunkGetter);
+        } finally {
+            AsyncSpawnPhaseContext.pop();
+        }
 
         PotentialCalculator potentialCalculator = new PotentialCalculator();
         for (int i = 0, n = result.charges.size(); i < n; i++) {
