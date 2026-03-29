@@ -45,13 +45,13 @@ public class ParallelProcessor {
     private static final long ASYNC_ABORT_FALLBACK_SUMMARY_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(5);
     public static ExecutorService tickPool;
     public static ExecutorService spawnPool;
+    public static volatile it.unimi.dsi.fastutil.longs.LongOpenHashSet spawnableChunkPositions;
     private static final Set<UUID> blacklistedEntity = ConcurrentHashMap.newKeySet();
     private static final Map<UUID, Integer> temporarilySynchronizedEntities = new ConcurrentHashMap<>();
     private static final Map<String, AsyncAbortFallbackSummary> asyncAbortFallbackSummaries = new ConcurrentHashMap<>();
     private static final Map<String, Set<WeakReference<Thread>>> mcThreadTracker = new ConcurrentHashMap<>();
     private static final ThreadLocal<ExecutionRole> executionRole = ThreadLocal.withInitial(() -> ExecutionRole.NONE);
     private static final Object ENTITY_ADD_LOCK = new Object();
-    public static volatile it.unimi.dsi.fastutil.longs.LongOpenHashSet spawnableChunkPositions;
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,

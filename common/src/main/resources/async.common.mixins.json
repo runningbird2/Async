@@ -58,7 +58,6 @@
     "entity.spawn.NaturalSpawnerMixin",
     "entity.spawn.NaturalSpawnerSpawnStateInvoker",
     "entity.spawn.SpawnStateMixin",
-    "entity.spawn.SpawnStateConstructorInvoker",
     "entity.spawn.PotentialCalculatorMixin",
     "lithium.AsyncLithiumEntityMovementTrackerMixin",
     "lithium.AsyncLithiumEntitySectionMixin",

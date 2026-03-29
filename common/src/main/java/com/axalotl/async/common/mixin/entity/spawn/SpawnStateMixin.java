@@ -18,7 +18,6 @@ import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.PotentialCalculator;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.chunk.ChunkAccess;
-import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -36,9 +35,6 @@ public class SpawnStateMixin implements AsyncSpawnStateMobcapAccess {
     @Shadow @Final private PotentialCalculator spawnPotential;
     @Shadow @Final private LocalMobCapCalculator localMobCapCalculator;
     @Shadow @Final private Object2IntOpenHashMap<MobCategory> mobCategoryCounts;
-    @Shadow private @Nullable BlockPos lastCheckedPos;
-    @Shadow private @Nullable EntityType<?> lastCheckedType;
-    @Shadow private double lastCharge;
 
     @Unique
     private final AtomicIntegerArray async$atomicMobCounts = new AtomicIntegerArray(MobCategory.values().length);
