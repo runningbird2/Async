@@ -60,9 +60,9 @@ public final class ParallelSpawnHelper {
         }
 
         int poolSize = ParallelProcessor.getEffectiveSpawnPoolSize();
-        int chunkSize = Math.max(SPAWN_GRAIN, length / poolSize);
+        int chunkSize = Math.max(SPAWN_GRAIN, (length + poolSize - 1) / poolSize);
 
-        List<CompletableFuture<SpawnResult>> futures = new ArrayList<>();
+        List<CompletableFuture<SpawnResult>> futures = new ArrayList<>((length + chunkSize - 1) / chunkSize);
         for (int i = 0; i < length; i += chunkSize) {
             int from = i;
             int to = Math.min(i + chunkSize, length);
