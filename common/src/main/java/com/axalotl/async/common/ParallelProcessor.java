@@ -267,7 +267,10 @@ public class ParallelProcessor {
     private static void waitForFutures(List<? extends Future<?>> futures) {
         boolean allDone;
         do {
-            allDone = futures.stream().allMatch(Future::isDone);
+            allDone = true;
+            for (int fi = 0; fi < futures.size(); fi++) {
+                if (!futures.get(fi).isDone()) { allDone = false; break; }
+            }
             if (!allDone) {
                 if (isShuttingDown) {
                     break;
