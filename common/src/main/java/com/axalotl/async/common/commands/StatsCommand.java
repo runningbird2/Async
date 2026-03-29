@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -245,10 +246,15 @@ public class StatsCommand {
     }
 
     private static void showMobcapBreakdown(CommandSourceStack source, ServerPlayer target) {
-        NaturalSpawner.SpawnState spawnState = ((AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource()).async$getLastSpawnState();
+        AsyncServerChunkCacheSpawnStateAccess chunkSourceAccess = (AsyncServerChunkCacheSpawnStateAccess) target.level().getChunkSource();
+        NaturalSpawner.SpawnState spawnState = chunkSourceAccess.async$getLastSpawnState();
         AsyncSpawnStateMobcapAccess mobcapAccess = spawnState instanceof AsyncSpawnStateMobcapAccess access ? access : null;
 
         List<ServerPlayer> players = new ArrayList<>(target.level().players());
+        int softDespawnDistance = MobCategory.MONSTER.getNoDespawnDistance();
+        int hardDespawnDistance = MobCategory.MONSTER.getDespawnDistance();
+        double softDespawnDistanceSqr = (double) softDespawnDistance * softDespawnDistance;
+        double hardDespawnDistanceSqr = (double) hardDespawnDistance * hardDespawnDistance;
         int totalMonsters = 0;
         int currentCountedMonsters = 0;
         int excludedPersistentMonsters = 0;
@@ -260,6 +266,15 @@ public class StatsCommand {
         int singleNearbyMonsters = 0;
         int sharedNearbyMonsters = 0;
         int maxNearbyPlayers = 0;
+        int countedWithinSoftDespawn = 0;
+        int countedSoftToHardDespawn = 0;
+        int countedBeyondHardDespawn = 0;
+        int countedBeyondHardDespawnTicking = 0;
+        int countedBeyondHardDespawnNonTicking = 0;
+        int zeroNearbyCountedMonsters = 0;
+        int zeroNearbyCountedBeyondHardDespawn = 0;
+        int zeroNearbyCountedBeyondHardTicking = 0;
+        List<String> zeroNearbyHardDespawnSamples = new ArrayList<>();
 
         for (Entity entity : target.level().getAllEntities()) {
             if (!entity.isAlive() || entity.getType().getCategory() != MobCategory.MONSTER) {
@@ -268,7 +283,9 @@ public class StatsCommand {
 
             totalMonsters++;
 
-            int nearbyPlayers = async$countPlayersCloseForSpawning(players, new ChunkPos(entity.blockPosition()));
+            ChunkPos entityChunkPos = new ChunkPos(entity.blockPosition());
+            long entityChunkLong = entityChunkPos.toLong();
+            int nearbyPlayers = async$countPlayersCloseForSpawning(players, entityChunkPos);
             maxNearbyPlayers = Math.max(maxNearbyPlayers, nearbyPlayers);
             if (nearbyPlayers <= 0) {
                 zeroNearbyMonsters++;
@@ -300,6 +317,49 @@ public class StatsCommand {
                 flaggedCountedMonsters++;
             } else {
                 unflaggedCountedMonsters++;
+            }
+
+            NearestPlayerDistance nearestPlayer = async$findNearestSpawningPlayer(players, entity);
+            double nearestDistanceSqr = nearestPlayer != null ? nearestPlayer.distanceSqr() : Double.POSITIVE_INFINITY;
+            boolean beyondHardDespawn = nearestDistanceSqr > hardDespawnDistanceSqr;
+            boolean beyondSoftDespawn = nearestDistanceSqr > softDespawnDistanceSqr;
+            boolean tickingChunk = chunkSourceAccess.async$hasTickingChunk(entityChunkLong);
+            boolean fullChunkLoaded = chunkSourceAccess.async$hasFullChunk(entityChunkLong);
+
+            if (beyondHardDespawn) {
+                countedBeyondHardDespawn++;
+                if (tickingChunk) {
+                    countedBeyondHardDespawnTicking++;
+                } else if (fullChunkLoaded) {
+                    countedBeyondHardDespawnNonTicking++;
+                }
+            } else if (beyondSoftDespawn) {
+                countedSoftToHardDespawn++;
+            } else {
+                countedWithinSoftDespawn++;
+            }
+
+            if (nearbyPlayers <= 0) {
+                zeroNearbyCountedMonsters++;
+                if (beyondHardDespawn) {
+                    zeroNearbyCountedBeyondHardDespawn++;
+                    if (tickingChunk) {
+                        zeroNearbyCountedBeyondHardTicking++;
+                    }
+                    if (zeroNearbyHardDespawnSamples.size() < 5) {
+                        String typeName = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath();
+                        String nearestPlayerName = nearestPlayer != null ? nearestPlayer.player().getScoreboardName() : "none";
+                        double nearestDistance = nearestPlayer != null ? Math.sqrt(nearestDistanceSqr) : Double.POSITIVE_INFINITY;
+                        zeroNearbyHardDespawnSamples.add(
+                                typeName
+                                        + " @ " + entity.blockPosition().getX() + ", " + entity.blockPosition().getY() + ", " + entity.blockPosition().getZ()
+                                        + " chunk " + entityChunkPos.x + ", " + entityChunkPos.z
+                                        + " nearest " + nearestPlayerName + "=" + async$formatDistance(nearestDistance)
+                                        + " full=" + fullChunkLoaded
+                                        + " ticking=" + tickingChunk
+                        );
+                    }
+                }
             }
         }
 
@@ -343,6 +403,19 @@ public class StatsCommand {
                 .append(Component.literal(String.valueOf(flaggedExcludedMonsters)).withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal("\nUnmarked But Counted Now: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal(String.valueOf(unflaggedCountedMonsters)).withStyle(unflaggedCountedMonsters > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
+                .append(Component.literal("\nCounted Distance Bands: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal("<= " + softDespawnDistance + "=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(countedWithinSoftDespawn)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("  " + (softDespawnDistance + 1) + "-" + hardDespawnDistance + "=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(countedSoftToHardDespawn)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("  >" + hardDespawnDistance + "=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(countedBeyondHardDespawn)).withStyle(countedBeyondHardDespawn > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
+                .append(Component.literal("\nCounted Beyond Hard Despawn: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(countedBeyondHardDespawn)).withStyle(countedBeyondHardDespawn > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
+                .append(Component.literal("  ticking=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(countedBeyondHardDespawnTicking)).withStyle(countedBeyondHardDespawnTicking > 0 ? ChatFormatting.RED : ChatFormatting.GREEN))
+                .append(Component.literal("  full-only=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(countedBeyondHardDespawnNonTicking)).withStyle(countedBeyondHardDespawnNonTicking > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
                 .append(Component.literal("\nNearby Player Coverage: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal("0=").withStyle(ChatFormatting.GRAY))
                 .append(Component.literal(String.valueOf(zeroNearbyMonsters)).withStyle(ChatFormatting.GREEN))
@@ -350,6 +423,12 @@ public class StatsCommand {
                 .append(Component.literal(String.valueOf(singleNearbyMonsters)).withStyle(ChatFormatting.GREEN))
                 .append(Component.literal("  2+=").withStyle(ChatFormatting.GRAY))
                 .append(Component.literal(String.valueOf(sharedNearbyMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nZero-Coverage Counted Now: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(zeroNearbyCountedMonsters)).withStyle(ChatFormatting.GREEN))
+                .append(Component.literal("\nZero-Coverage Counted Beyond Hard: ").withStyle(ChatFormatting.WHITE))
+                .append(Component.literal(String.valueOf(zeroNearbyCountedBeyondHardDespawn)).withStyle(zeroNearbyCountedBeyondHardDespawn > 0 ? ChatFormatting.YELLOW : ChatFormatting.GREEN))
+                .append(Component.literal("  ticking=").withStyle(ChatFormatting.GRAY))
+                .append(Component.literal(String.valueOf(zeroNearbyCountedBeyondHardTicking)).withStyle(zeroNearbyCountedBeyondHardTicking > 0 ? ChatFormatting.RED : ChatFormatting.GREEN))
                 .append(Component.literal("\nMax Nearby Players On A Monster Chunk: ").withStyle(ChatFormatting.WHITE))
                 .append(Component.literal(String.valueOf(maxNearbyPlayers)).withStyle(ChatFormatting.GREEN));
 
@@ -389,6 +468,14 @@ public class StatsCommand {
                     .append(Component.literal("unavailable").withStyle(ChatFormatting.RED));
         }
 
+        if (!zeroNearbyHardDespawnSamples.isEmpty()) {
+            message.append(Component.literal("\nZero-Coverage > Hard Despawn Samples:").withStyle(ChatFormatting.GOLD));
+            for (int i = 0; i < zeroNearbyHardDespawnSamples.size(); i++) {
+                message.append(Component.literal("\n" + (i + 1) + ". ").withStyle(ChatFormatting.GRAY))
+                        .append(Component.literal(zeroNearbyHardDespawnSamples.get(i)).withStyle(ChatFormatting.YELLOW));
+            }
+        }
+
         source.sendSuccess(() -> message, false);
     }
 
@@ -412,6 +499,35 @@ public class StatsCommand {
         return nearbyPlayers;
     }
 
+    private static NearestPlayerDistance async$findNearestSpawningPlayer(List<ServerPlayer> players, Entity entity) {
+        ServerPlayer nearestPlayer = null;
+        double nearestDistanceSqr = Double.POSITIVE_INFINITY;
+
+        for (ServerPlayer player : players) {
+            if (player.isSpectator()) {
+                continue;
+            }
+
+            double distanceSqr = player.distanceToSqr(entity);
+            if (distanceSqr < nearestDistanceSqr) {
+                nearestDistanceSqr = distanceSqr;
+                nearestPlayer = player;
+            }
+        }
+
+        if (nearestPlayer == null) {
+            return null;
+        }
+        return new NearestPlayerDistance(nearestPlayer, nearestDistanceSqr);
+    }
+
+    private static String async$formatDistance(double distance) {
+        if (!Double.isFinite(distance)) {
+            return "inf";
+        }
+        return String.format(Locale.ROOT, "%.1f", distance);
+    }
+
     private static String async$formatCategoryName(MobCategory category) {
         String[] parts = category.getName().split("_");
         StringBuilder builder = new StringBuilder();
@@ -429,5 +545,8 @@ public class StatsCommand {
             }
         }
         return builder.toString();
+    }
+
+    private record NearestPlayerDistance(ServerPlayer player, double distanceSqr) {
     }
 }

@@ -346,6 +346,21 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         return this.lastSpawnState;
     }
 
+    @Override
+    public boolean async$hasFullChunk(long chunkPos) {
+        ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPos);
+        if (holder == null) {
+            return false;
+        }
+        return holder.getFullChunkFuture().getNow(ChunkHolder.UNLOADED_LEVEL_CHUNK).orElse(null) != null;
+    }
+
+    @Override
+    public boolean async$hasTickingChunk(long chunkPos) {
+        ChunkHolder holder = this.getVisibleChunkIfPresent(chunkPos);
+        return holder != null && holder.getTickingChunk() != null;
+    }
+
     @Unique
     private void async$publishSpawnStateSync(int naturalSpawnChunkCount) {
         synchronized (this.async$spawnStateLock) {

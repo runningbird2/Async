@@ -7,4 +7,8 @@ public interface AsyncServerChunkCacheSpawnStateAccess {
 
     @Nullable
     NaturalSpawner.SpawnState async$getLastSpawnState();
+
+    boolean async$hasFullChunk(long chunkPos);
+
+    boolean async$hasTickingChunk(long chunkPos);
 }
