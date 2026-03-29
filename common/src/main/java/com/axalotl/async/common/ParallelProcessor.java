@@ -50,6 +50,8 @@ public class ParallelProcessor {
     private static final Map<String, AsyncAbortFallbackSummary> asyncAbortFallbackSummaries = new ConcurrentHashMap<>();
     private static final Map<String, Set<WeakReference<Thread>>> mcThreadTracker = new ConcurrentHashMap<>();
     private static final ThreadLocal<ExecutionRole> executionRole = ThreadLocal.withInitial(() -> ExecutionRole.NONE);
+    private static final Object ENTITY_ADD_LOCK = new Object();
+    public static volatile it.unimi.dsi.fastutil.longs.LongOpenHashSet spawnableChunkPositions;
     public static final Set<Class<?>> BLOCKED_ENTITIES = Set.of(
             FallingBlockEntity.class,
             Shulker.class,
@@ -142,6 +144,10 @@ public class ParallelProcessor {
 
     public static boolean isShuttingDown() {
         return isShuttingDown;
+    }
+
+    public static Object getEntityAddLock() {
+        return ENTITY_ADD_LOCK;
     }
 
     public static boolean isAbortThrowable(Throwable throwable) {

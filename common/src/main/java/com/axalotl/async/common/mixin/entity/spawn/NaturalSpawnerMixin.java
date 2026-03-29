@@ -1,16 +1,25 @@
 package com.axalotl.async.common.mixin.entity.spawn;
 
+import com.axalotl.async.common.ParallelProcessor;
+import com.axalotl.async.common.config.AsyncConfig;
+import com.axalotl.async.common.parallelised.utils.ParallelSpawnHelper;
+import com.axalotl.async.common.parallelised.utils.ParallelSpawnHelper.ChargeEntry;
+import com.axalotl.async.common.parallelised.utils.ParallelSpawnHelper.SpawnResult;
 import com.axalotl.async.common.platform.PlatformUtils;
+import com.axalotl.async.common.spawn.AsyncLocalMobCapCalculator;
 import com.axalotl.async.common.spawn.AsyncSpawnCapMarkingContext;
 import com.axalotl.async.common.spawn.AsyncSpawnStateMobcapAccess;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.util.profiling.Profiler;
 import net.minecraft.util.profiling.ProfilerFiller;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
@@ -18,7 +27,10 @@ import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.SpawnGroupData;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.LocalMobCapCalculator;
 import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.PotentialCalculator;
+import net.minecraft.world.level.ServerLevelAccessor;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.block.state.BlockState;
@@ -26,13 +38,66 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.LevelChunk;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.gen.Invoker;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-@Mixin(NaturalSpawner.class)
+@Mixin(value = NaturalSpawner.class, priority = 900)
 public abstract class NaturalSpawnerMixin {
+
+    @Inject(method = "createState", at = @At("HEAD"), cancellable = true)
+    private static void async$createState(int spawnableChunkCount, Iterable<Entity> entities, NaturalSpawner.ChunkGetter chunkGetter, LocalMobCapCalculator localMobCapCalculator, CallbackInfoReturnable<NaturalSpawner.SpawnState> cir) {
+        if (AsyncConfig.disabled || !AsyncConfig.enableAsyncSpawn) return;
+        if (ParallelProcessor.tickPool == null) return;
+        cir.setReturnValue(async$createStateParallel(spawnableChunkCount, entities, chunkGetter, localMobCapCalculator));
+    }
+
+    @Unique
+    private static NaturalSpawner.SpawnState async$createStateParallel(int spawnableChunkCount, Iterable<Entity> entities, NaturalSpawner.ChunkGetter chunkGetter, LocalMobCapCalculator localMobCapCalculator) {
+        List<Entity> entityList;
+        if (entities instanceof List<Entity> list) {
+            entityList = list;
+        } else {
+            entityList = new ArrayList<>();
+            entities.forEach(entityList::add);
+        }
+
+        if (entityList.isEmpty()) {
+            return new NaturalSpawner.SpawnState(spawnableChunkCount, new Object2IntOpenHashMap<>(), new PotentialCalculator(), localMobCapCalculator);
+        }
+
+        Entity[] entityArray = entityList.toArray(new Entity[0]);
+        SpawnResult result = ParallelSpawnHelper.collectSpawnData(entityArray, chunkGetter);
+
+        PotentialCalculator potentialCalculator = new PotentialCalculator();
+        for (int i = 0, n = result.charges.size(); i < n; i++) {
+            ChargeEntry c = result.charges.get(i);
+            potentialCalculator.addCharge(c.pos(), c.charge());
+        }
+
+        if (localMobCapCalculator instanceof AsyncLocalMobCapCalculator asyncLocalMobCapCalculator) {
+            asyncLocalMobCapCalculator.async$applyChunkCounts(result.chunkMobCounts);
+        } else {
+            for (var entry : result.chunkMobCounts.long2ObjectEntrySet()) {
+                ChunkPos chunkPos = new ChunkPos(entry.getLongKey());
+                int[] counts = entry.getValue();
+                for (MobCategory category : MobCategory.values()) {
+                    int count = category.ordinal() < counts.length ? counts[category.ordinal()] : 0;
+                    for (int i = 0; i < count; i++) {
+                        localMobCapCalculator.addMob(chunkPos, category);
+                    }
+                }
+            }
+        }
+
+        return new NaturalSpawner.SpawnState(spawnableChunkCount, result.mobCounts, potentialCalculator, localMobCapCalculator);
+    }
 
     @WrapMethod(method = "spawnForChunk")
     private static void async$spawnForChunk(
@@ -77,6 +142,23 @@ public abstract class NaturalSpawnerMixin {
         profiler.pop();
     }
 
+    @WrapMethod(method = "spawnMobsForChunkGeneration")
+    private static void async$markChunkGenerationSpawns(
+            ServerLevelAccessor levelAccessor,
+            net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome,
+            ChunkPos chunkPos,
+            RandomSource randomSource,
+            Operation<Void> original
+    ) {
+        AsyncSpawnCapMarkingContext.push();
+        try {
+            original.call(levelAccessor, biome, chunkPos, randomSource);
+        } finally {
+            AsyncSpawnCapMarkingContext.pop();
+        }
+    }
+
+    @Unique
     private static int async$getLocalMaxSpawns(
             AsyncSpawnStateMobcapAccess mobcapAccess,
             MobCategory category,
@@ -88,6 +170,7 @@ public abstract class NaturalSpawnerMixin {
         return Math.max(0, mobcapAccess.async$getMinLocalMobHeadroom(category, chunkPos));
     }
 
+    @Unique
     private static void async$spawnCategoryForChunk(
             MobCategory category,
             ServerLevel level,
@@ -101,6 +184,7 @@ public abstract class NaturalSpawnerMixin {
         }
     }
 
+    @Unique
     private static void async$spawnCategoryForPosition(
             MobCategory category,
             ServerLevel level,
@@ -209,23 +293,6 @@ public abstract class NaturalSpawnerMixin {
             }
         }
     }
-
-    @WrapMethod(method = "spawnMobsForChunkGeneration")
-    private static void async$markChunkGenerationSpawns(
-            net.minecraft.world.level.ServerLevelAccessor levelAccessor,
-            net.minecraft.core.Holder<net.minecraft.world.level.biome.Biome> biome,
-            ChunkPos chunkPos,
-            net.minecraft.util.RandomSource randomSource,
-            Operation<Void> original
-    ) {
-        AsyncSpawnCapMarkingContext.push();
-        try {
-            original.call(levelAccessor, biome, chunkPos, randomSource);
-        } finally {
-            AsyncSpawnCapMarkingContext.pop();
-        }
-    }
-
 }
 
 @Mixin(NaturalSpawner.class)
@@ -275,7 +342,7 @@ interface NaturalSpawnerInvoker {
             StructureManager structureManager,
             ChunkGenerator chunkGenerator,
             MobCategory category,
-            net.minecraft.util.RandomSource random,
+            RandomSource random,
             BlockPos pos
     ) {
         throw new AssertionError();

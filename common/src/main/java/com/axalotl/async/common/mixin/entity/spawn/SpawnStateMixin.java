@@ -8,7 +8,6 @@ import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.QuartPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
@@ -17,7 +16,6 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LocalMobCapCalculator;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.PotentialCalculator;
-import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import org.jetbrains.annotations.Nullable;
@@ -46,28 +44,60 @@ public class SpawnStateMixin implements AsyncSpawnStateMobcapAccess {
     private final AtomicIntegerArray async$atomicMobCounts = new AtomicIntegerArray(MobCategory.values().length);
 
     @Unique
+    private static final ThreadLocal<long[]> async$chargeCache = ThreadLocal.withInitial(() -> new long[3]);
+
+    @Unique
     private volatile int async$monsterCountOffset = 0;
 
     @Inject(method = "<init>", at = @At("TAIL"))
-    private void async$initAtomicCounts(int spawnableChunkCount, Object2IntOpenHashMap<MobCategory> mobCategoryCounts, PotentialCalculator spawnPotential, LocalMobCapCalculator localMobCapCalculator, CallbackInfo ci) {
+    private void async$initAtomicCounts(
+            int spawnableChunkCount,
+            Object2IntOpenHashMap<MobCategory> mobCategoryCounts,
+            PotentialCalculator spawnPotential,
+            LocalMobCapCalculator localMobCapCalculator,
+            CallbackInfo ci) {
         for (MobCategory cat : MobCategory.values()) {
             async$atomicMobCounts.set(cat.ordinal(), this.mobCategoryCounts.getInt(cat));
         }
+    }
+
+    @WrapMethod(method = "canSpawn")
+    private boolean async$canSpawn(EntityType<?> type, BlockPos testPos, ChunkAccess chunk, Operation<Boolean> original) {
+        MobSpawnSettings.MobSpawnCost cost = NaturalSpawner.getRoughBiome(testPos, chunk).getMobSettings().getMobSpawnCost(type);
+
+        double charge;
+        if (cost == null) {
+            charge = 0.0;
+        } else {
+            charge = cost.charge();
+            double energyChange = this.spawnPotential.getPotentialEnergyChange(testPos, charge);
+            if (energyChange > cost.energyBudget()) {
+                return false;
+            }
+        }
+        long[] cache = async$chargeCache.get();
+        cache[0] = testPos.asLong();
+        cache[1] = System.identityHashCode(type);
+        cache[2] = Double.doubleToRawLongBits(charge);
+        return true;
     }
 
     @WrapMethod(method = "afterSpawn")
     private void async$afterSpawn(Mob mob, ChunkAccess chunk, Operation<Void> original) {
         EntityType<?> type = mob.getType();
         BlockPos pos = mob.blockPosition();
+        long[] cache = async$chargeCache.get();
+        long posLong = pos.asLong();
+        int typeIdentity = System.identityHashCode(type);
+
         double charge;
-        if (pos.equals(this.lastCheckedPos) && type == this.lastCheckedType) {
-            charge = this.lastCharge;
+        if (cache[0] == posLong && cache[1] == typeIdentity) {
+            charge = Double.longBitsToDouble(cache[2]);
         } else {
-            Biome biome = chunk.getNoiseBiome(QuartPos.fromBlock(pos.getX()), QuartPos.fromBlock(pos.getY()), QuartPos.fromBlock(pos.getZ())).value();
-            MobSpawnSettings.MobSpawnCost cost = biome.getMobSettings().getMobSpawnCost(type);
+            MobSpawnSettings.MobSpawnCost cost = NaturalSpawner.getRoughBiome(pos, chunk)
+                    .getMobSettings().getMobSpawnCost(type);
             charge = cost != null ? cost.charge() : 0.0;
         }
-
         this.spawnPotential.addCharge(pos, charge);
         MobCategory category = type.getCategory();
         async$atomicMobCounts.incrementAndGet(category.ordinal());
@@ -123,6 +153,7 @@ public class SpawnStateMixin implements AsyncSpawnStateMobcapAccess {
         return this.spawnableChunkCount;
     }
 
+    @Override
     public int async$getLocalMobCount(ServerPlayer player, MobCategory category) {
         return this.async$getLocalMobCapCalculator().async$getMobCount(player, category);
     }
