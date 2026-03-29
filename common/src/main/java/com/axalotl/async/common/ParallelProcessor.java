@@ -33,6 +33,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 public class ParallelProcessor {
@@ -44,6 +45,10 @@ public class ParallelProcessor {
     public static final AtomicInteger currentEntities = new AtomicInteger();
     private static final AtomicInteger threadPoolID = new AtomicInteger();
     private static final AtomicInteger spawnPoolID = new AtomicInteger();
+    private static final AtomicInteger spawnTasksOnSpawnPool = new AtomicInteger();
+    private static final AtomicInteger spawnTasksOnTickPool = new AtomicInteger();
+    private static final AtomicInteger spawnTasksInline = new AtomicInteger();
+    private static final AtomicLong spawnTaskWindowStartNanos = new AtomicLong();
     private static final int ASYNC_ABORT_SYNC_COOLDOWN_TICKS = 5;
     private static final long ASYNC_ABORT_FALLBACK_SUMMARY_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(5);
     public static ExecutorService tickPool;
@@ -174,6 +179,11 @@ public class ParallelProcessor {
         return 0;
     }
 
+    public static int getEffectiveSpawnPoolSize() {
+        int spawnPoolSize = getSpawnPoolSize();
+        return spawnPoolSize > 0 ? spawnPoolSize : getPoolSize();
+    }
+
     public static ExecutorService getSpawnExecutor() {
         return spawnPool != null ? spawnPool : tickPool;
     }
@@ -190,6 +200,7 @@ public class ParallelProcessor {
         };
 
         if (!async$tryScheduleSpawn(wrapped)) {
+            spawnTasksInline.incrementAndGet();
             wrapped.run();
         }
 
@@ -207,6 +218,7 @@ public class ParallelProcessor {
         };
 
         if (!async$tryScheduleSpawn(wrapped)) {
+            spawnTasksInline.incrementAndGet();
             wrapped.run();
         }
 
@@ -214,12 +226,19 @@ public class ParallelProcessor {
     }
 
     private static boolean async$tryScheduleSpawn(Runnable task) {
-        ExecutorService primary = spawnPool != null ? spawnPool : tickPool;
-        if (async$tryExecute(primary, task)) {
+        spawnTaskWindowStartNanos.compareAndSet(0L, System.nanoTime());
+
+        if (spawnPool != null && async$tryExecute(spawnPool, task)) {
+            spawnTasksOnSpawnPool.incrementAndGet();
             return true;
         }
 
-        return primary != tickPool && async$tryExecute(tickPool, task);
+        if (async$tryExecute(tickPool, task)) {
+            spawnTasksOnTickPool.incrementAndGet();
+            return true;
+        }
+
+        return false;
     }
 
     private static boolean async$tryExecute(ExecutorService executor, Runnable task) {
@@ -233,6 +252,33 @@ public class ParallelProcessor {
         } catch (RejectedExecutionException ignored) {
             return false;
         }
+    }
+
+    public static String maybeDrainSpawnSchedulingSummary(long intervalNanos) {
+        long windowStart = spawnTaskWindowStartNanos.get();
+        if (windowStart == 0L) {
+            return null;
+        }
+
+        long now = System.nanoTime();
+        if (now - windowStart < intervalNanos) {
+            return null;
+        }
+
+        if (!spawnTaskWindowStartNanos.compareAndSet(windowStart, 0L)) {
+            return null;
+        }
+
+        int spawnPoolCount = spawnTasksOnSpawnPool.getAndSet(0);
+        int tickPoolCount = spawnTasksOnTickPool.getAndSet(0);
+        int inlineCount = spawnTasksInline.getAndSet(0);
+        if (spawnPoolCount == 0 && tickPoolCount == 0 && inlineCount == 0) {
+            return null;
+        }
+
+        return "spawnPool=" + spawnPoolCount
+                + ", tickPool=" + tickPoolCount
+                + ", inline=" + inlineCount;
     }
 
     @SuppressWarnings("unchecked")

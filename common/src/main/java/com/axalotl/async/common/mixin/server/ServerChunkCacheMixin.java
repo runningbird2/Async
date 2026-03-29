@@ -355,7 +355,7 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
         }
         ParallelProcessor.spawnableChunkPositions = set;
 
-        int poolSize = Math.max(1, ParallelProcessor.getPoolSize());
+        int poolSize = Math.max(1, ParallelProcessor.getEffectiveSpawnPoolSize());
         int batchSize = Math.max(4, (chunks.length + poolSize - 1) / poolSize);
         int batchCount = (chunks.length + batchSize - 1) / batchSize;
         CompletableFuture<?>[] futures = new CompletableFuture<?>[batchCount];
@@ -526,6 +526,14 @@ public abstract class ServerChunkCacheMixin extends ChunkSource implements Async
 
     @Unique
     private synchronized void async$flushSpawnFallbackSummaryIfDue() {
+        String schedulingSummary = ParallelProcessor.maybeDrainSpawnSchedulingSummary(SPAWN_FALLBACK_SUMMARY_INTERVAL_NANOS);
+        if (schedulingSummary != null) {
+            ParallelProcessor.LOGGER.warn(
+                    "Async spawn task scheduling over the last 5 minutes: {}",
+                    schedulingSummary
+            );
+        }
+
         long windowStartNanos = this.async$spawnFallbackSummaryWindowStartNanos;
         if (windowStartNanos == 0L) {
             return;

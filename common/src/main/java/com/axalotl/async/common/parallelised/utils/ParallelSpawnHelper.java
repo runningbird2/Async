@@ -3,13 +3,16 @@ package com.axalotl.async.common.parallelised.utils;
 import com.axalotl.async.common.ParallelProcessor;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.biome.MobSpawnSettings;
+import net.minecraft.world.level.chunk.LevelChunk;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -56,7 +59,7 @@ public final class ParallelSpawnHelper {
             return computeRange(entities, chunkGetter, 0, length);
         }
 
-        int poolSize = ParallelProcessor.getPoolSize();
+        int poolSize = ParallelProcessor.getEffectiveSpawnPoolSize();
         int chunkSize = Math.max(SPAWN_GRAIN, length / poolSize);
 
         List<CompletableFuture<SpawnResult>> futures = new ArrayList<>();
@@ -82,13 +85,21 @@ public final class ParallelSpawnHelper {
             int to
     ) {
         SpawnResult result = new SpawnResult();
+        Long2ObjectOpenHashMap<LevelChunk> chunkCache = new Long2ObjectOpenHashMap<>();
+        LongOpenHashSet missingChunks = new LongOpenHashSet();
         for (int i = from; i < to; i++) {
-            processEntity(entities[i], chunkGetter, result);
+            processEntity(entities[i], chunkGetter, result, chunkCache, missingChunks);
         }
         return result;
     }
 
-    private static void processEntity(Entity entity, NaturalSpawner.ChunkGetter chunkGetter, SpawnResult result) {
+    private static void processEntity(
+            Entity entity,
+            NaturalSpawner.ChunkGetter chunkGetter,
+            SpawnResult result,
+            Long2ObjectOpenHashMap<LevelChunk> chunkCache,
+            LongOpenHashSet missingChunks
+    ) {
         if (entity instanceof Mob mob && (mob.isPersistenceRequired() || mob.requiresCustomPersistence())) {
             return;
         }
@@ -99,23 +110,37 @@ public final class ParallelSpawnHelper {
         }
 
         BlockPos blockPos = entity.blockPosition();
-        chunkGetter.query(net.minecraft.world.level.ChunkPos.asLong(blockPos), chunk -> {
-            MobSpawnSettings.MobSpawnCost cost = NaturalSpawner.getRoughBiome(blockPos, chunk)
-                    .getMobSettings()
-                    .getMobSpawnCost(entity.getType());
-            if (cost != null) {
-                result.charges.add(new ChargeEntry(blockPos, cost.charge()));
-            }
+        long chunkLong = ChunkPos.asLong(blockPos);
+        if (missingChunks.contains(chunkLong)) {
+            return;
+        }
 
-            result.mobCounts.addTo(category, 1);
-            if (entity instanceof Mob) {
-                long chunkLong = chunk.getPos().toLong();
-                int[] counts = result.chunkMobCounts.computeIfAbsent(
-                        chunkLong,
-                        ignored -> new int[MobCategory.values().length]
-                );
-                counts[category.ordinal()]++;
+        LevelChunk chunk = chunkCache.get(chunkLong);
+        if (chunk == null) {
+            final LevelChunk[] resolvedChunk = new LevelChunk[1];
+            chunkGetter.query(chunkLong, levelChunk -> resolvedChunk[0] = levelChunk);
+            chunk = resolvedChunk[0];
+            if (chunk == null) {
+                missingChunks.add(chunkLong);
+                return;
             }
-        });
+            chunkCache.put(chunkLong, chunk);
+        }
+
+        MobSpawnSettings.MobSpawnCost cost = NaturalSpawner.getRoughBiome(blockPos, chunk)
+                .getMobSettings()
+                .getMobSpawnCost(entity.getType());
+        if (cost != null) {
+            result.charges.add(new ChargeEntry(blockPos, cost.charge()));
+        }
+
+        result.mobCounts.addTo(category, 1);
+        if (entity instanceof Mob) {
+            int[] counts = result.chunkMobCounts.computeIfAbsent(
+                    chunkLong,
+                    ignored -> new int[MobCategory.values().length]
+            );
+            counts[category.ordinal()]++;
+        }
     }
 }
